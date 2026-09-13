@@ -24,10 +24,30 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Vet and test (unit, golden, Sanitize)
+      - name: Vet and test (unit, golden, Sanitize) — and say what ran, in the job summary
         run: |
           go vet ./...
-          go test ./... -count=1
+          set -o pipefail
+          go test ./... -count=1 -json | tee /tmp/go-test.json | grep -E '"Action":"(fail)"' || true
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, collections
+          pk = collections.defaultdict(lambda: collections.Counter()); golden = []; failed = []
+          for l in open('/tmp/go-test.json'):
+              try: e = json.loads(l)
+              except ValueError: continue
+              if e.get('Test') and e.get('Action') in ('pass', 'fail', 'skip'):
+                  pk[e['Package'].split('/')[-1]][e['Action']] += 1
+                  if e['Action'] == 'fail': failed.append(e['Package'].split('/')[-1] + ' ' + e['Test'])
+                  if e['Test'].startswith('TestGolden/'): golden.append((e['Test'][len('TestGolden/'):], e['Action']))
+          print('## Tests\n'); print('| package | passed | failed | skipped |'); print('|---|---|---|---|')
+          for k, c in sorted(pk.items()): print(f"| {k} | {c['pass']} | {c['fail']} | {c['skip']} |")
+          print(f"\n**{sum(c['pass'] for c in pk.values())} passed, {sum(c['fail'] for c in pk.values())} failed.**")
+          if failed: print('\nFailed: ' + ', '.join(failed))
+          print('\n## The 14 golden captures (byte-for-byte against 0.6.3, deliberate changes named in internal/testdata/golden/README.md)\n')
+          print('| capture | result |'); print('|---|---|')
+          for n, a in sorted(golden): print(f"| {n} | {'✅ identical' if a == 'pass' else '❌ differs'} |")
+          PY
+          ! grep -q '"Action":"fail"' /tmp/go-test.json
       - name: The embedded CRD is the pinned module's, byte for byte
         run: |
           set -eu
@@ -39,8 +59,12 @@ jobs:
         run: |
           set -eu
           crds=$(mktemp -d); cp internal/crd/ciliumnetworkpolicies.yaml "$crds/"
+          echo "## Every golden output against the CRD schema (kubectl-validate, cilium $(cat internal/crd/VERSION))" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"; echo "| file | documents | schema |" >> "$GITHUB_STEP_SUMMARY"; echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
           for f in internal/testdata/golden/*/expected.yaml; do
-            go run sigs.k8s.io/kubectl-validate@v0.0.4 --local-crds "$crds" "$f"
+            n=$(grep -c '^kind: CiliumNetworkPolicy' "$f")
+            if go run sigs.k8s.io/kubectl-validate@v0.0.4 --local-crds "$crds" "$f"; then r="✅ valid"; else r="❌ INVALID"; fi
+            echo "| $(basename "$(dirname "$f")") | $n | $r |" >> "$GITHUB_STEP_SUMMARY"
           done
       - name: The Kubernetes client machinery stays out of the binary
         # Two small helpers ride along with Cilium's policy API (k8s.io/client-go/util/jsonpath and its forked template,
@@ -56,11 +80,12 @@ jobs:
           size=$(stat -c %s /tmp/cf2cnp-size)
           echo "binary: $size bytes"
           test "$size" -lt 40000000 || { echo "the binary passed 40 MB: something heavy joined the graph"; exit 1; }
-      - name: The binary names the spec it supports
+      - name: The binary names the spec it supports, and validates every golden the way the agent would
         run: |
           go build -ldflags="-X main.version=ci" -o /tmp/cf2cnp ./cmd/cf2cnp
           /tmp/cf2cnp version
-          /tmp/cf2cnp validate internal/testdata/golden/*/expected.yaml
+          /tmp/cf2cnp validate internal/testdata/golden/*/expected.yaml | tee /tmp/validate.txt
+          { echo "## cf2cnp validate (Sanitize, ObjectMeta, the protocol enum, apiVersion/kind, nodeSelector, specs)"; echo; echo '```'; /tmp/cf2cnp version; echo "$(grep -c ' ok$' /tmp/validate.txt) documents accepted, $(grep -vc ' ok$' /tmp/validate.txt) refused"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: The policy-PR template's calls work (merge takes --l7)
         run: |
           set -eu
