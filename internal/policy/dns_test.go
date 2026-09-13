@@ -5,22 +5,22 @@ import (
 	"testing"
 )
 
-// 0.7.0: the DNS resolver rule is derived from the observed DNS flows. On a Kubernetes cluster the derived rule is
-// exactly what cf2cnp always wrote (kube-system, k8s-app=kube-dns, 53/UDP), so nothing changes for the demos.
+// 0.7.0: the DNS resolver rule is derived from the observed DNS flows. On a Kubernetes cluster the derived rule names
+// what cf2cnp always named (kube-system, k8s-app=kube-dns, 53) — the kubernetes profile — with the protocol ANY
+// (review ENH-003: 0.6.x wrote UDP, which denies the TCP retry of a truncated answer).
 func TestDNSResolver_DerivedKubernetes(t *testing.T) {
 	ps, err := NewGenerator("").WithDNSVisibility().BuildPolicies(load(t, "egress-pos-to-kube-dns.json", "egress-pos-to-world.json"))
 	if err != nil || len(ps) != 1 {
 		t.Fatalf("one policy expected: %d %v", len(ps), err)
 	}
-	historic := DNSResolver{Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}, Port: "53", Protocol: "UDP"}
-	if got, want := mustYAML(ps[0].Spec.Egress[len(ps[0].Spec.Egress)-1]), mustYAML(dnsRuleFor(historic)); got != want {
-		t.Fatalf("the derived Kubernetes resolver must equal the historic rule:\n%s\n%s", got, want)
+	if got, want := mustYAML(ps[0].Spec.Egress[len(ps[0].Spec.Egress)-1]), mustYAML(dnsRuleFor(dnsProfiles[DNSProfileKubernetes])); got != want {
+		t.Fatalf("the derived Kubernetes resolver must equal the kubernetes profile:\n%s\n%s", got, want)
 	}
 }
 
 // Cilium's DNS guide: "OpenShift users will need to modify the policies to match the namespace openshift-dns (instead
 // of kube-system), remove the match on the k8s:k8s-app=kube-dns label, and change the port to 5353". Derived from a
-// lookup to the DNS operator's pod: that rule, with the protocol as observed.
+// lookup to the DNS operator's pod: that rule, on the port observed, protocol ANY.
 func TestDNSResolver_DerivedOpenShift(t *testing.T) {
 	ps, err := NewGenerator("").WithDNSVisibility().BuildPolicies(load(t, "egress-pos-to-openshift-dns.json", "egress-pos-to-world.json"))
 	if err != nil || len(ps) != 1 {
@@ -31,13 +31,13 @@ func TestDNSResolver_DerivedOpenShift(t *testing.T) {
 	if labels["io.kubernetes.pod.namespace"] != "openshift-dns" || labels["k8s-app"] != "" || len(labels) != 1 {
 		t.Fatalf("the OpenShift resolver is the namespace alone, got %v", labels)
 	}
-	if p := dns.ToPorts[0].Ports[0]; p.Port != "5353" || p.Protocol != "UDP" {
-		t.Fatalf("port 5353 as observed (UDP), got %s/%s", p.Protocol, p.Port)
+	if p := dns.ToPorts[0].Ports[0]; p.Port != "5353" || p.Protocol != "ANY" {
+		t.Fatalf("port 5353 as observed, ANY, got %s/%s", p.Protocol, p.Port)
 	}
 	if dns.ToPorts[0].Rules == nil || dns.ToPorts[0].Rules.DNS[0].MatchPattern != "*" {
 		t.Fatalf("the L7 DNS rule must be there: %s", mustYAML(dns))
 	}
-	if !strings.Contains(ps[0].Spec.Description, "to endpoints in openshift-dns on UDP/5353 (DNS *)") {
+	if !strings.Contains(ps[0].Spec.Description, "to endpoints in openshift-dns on ANY/5353 (DNS *)") {
 		t.Fatalf("description: %q", ps[0].Spec.Description)
 	}
 	// the plain 5353 rule the lookup itself produced is shadowed by the L7 one, as for kube-dns (issue #1)

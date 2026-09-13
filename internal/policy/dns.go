@@ -37,8 +37,7 @@ const (
 )
 
 // The profiles write ANY, as Cilium's examples do: a lookup whose UDP answer is truncated retries over TCP, and a
-// rule with UDP alone denies that retry under default-deny egress. (0.6.x wrote 53/UDP; a resolver DERIVED from the
-// flows keeps the protocols observed, so the goldens, all derived from UDP lookups, are unchanged.)
+// rule with UDP alone denies that retry under default-deny egress. (0.6.x wrote 53/UDP; so does a derived resolver.)
 var dnsProfiles = map[string]DNSResolver{
 	DNSProfileKubernetes: {Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}, Port: "53", Protocol: "ANY"},
 	DNSProfileOpenShift:  {Namespace: "openshift-dns", Port: "5353", Protocol: "ANY"},
@@ -113,13 +112,14 @@ func (g *Generator) resolveDNS(flows []*aggregator.AggregatedFlow) DNSResolver {
 	return dnsProfiles[DNSProfileKubernetes]
 }
 
-// DeriveDNSResolver finds the resolver in the observed flows: an EGRESS flow to a pod on a DNS port (53 or 5353) in a
-// DNS namespace or with a DNS label. The rule then names that namespace, the identifying labels the pods carry
-// (k8s-app=kube-dns on Kubernetes; none on OpenShift, whose pods carry the operator's labels the naming does not use),
-// the port as observed, and ANY when both UDP and TCP lookups were seen.
+// DeriveDNSResolver finds the resolver in the observed flows: an EGRESS flow to a resolver pod (looksLikeDNS) on a
+// DNS port (53 or 5353). The rule then names that namespace, the identifying labels the pods carry (k8s-app=kube-dns
+// on Kubernetes; none on OpenShift, whose pods carry the operator's labels the naming does not use), the port as
+// observed — and the protocol ANY, whatever was observed: the rule exists to put the lookups through the proxy, not
+// to restrict a protocol, and a lookup whose UDP answer is truncated retries over TCP, which a UDP-only rule denies
+// under default-deny egress (review ENH-003; Cilium's examples write ANY; 0.6.x wrote the observed UDP).
 func DeriveDNSResolver(flows []*aggregator.AggregatedFlow) (DNSResolver, bool) {
 	var found *DNSResolver
-	protocols := map[string]bool{}
 	for _, f := range flows {
 		if f.Direction != "EGRESS" || f.IsReply || f.IsWorldTraffic || f.IsDestEntityTraffic {
 			continue
@@ -132,24 +132,15 @@ func DeriveDNSResolver(flows []*aggregator.AggregatedFlow) (DNSResolver, bool) {
 				continue
 			}
 			if found == nil {
-				found = &DNSResolver{Namespace: f.DestNamespace, Port: fmt.Sprint(p.Port)}
+				found = &DNSResolver{Namespace: f.DestNamespace, Port: fmt.Sprint(p.Port), Protocol: "ANY"}
 				if v, ok := f.DestLabels["k8s-app"]; ok {
 					found.Labels = map[string]string{"k8s-app": v}
 				}
 			}
-			protocols[strings.ToUpper(p.Protocol)] = true
 		}
 	}
 	if found == nil {
 		return DNSResolver{}, false
-	}
-	switch {
-	case protocols["UDP"] && protocols["TCP"]:
-		found.Protocol = "ANY"
-	case protocols["TCP"]:
-		found.Protocol = "TCP"
-	default:
-		found.Protocol = "UDP"
 	}
 	return *found, true
 }

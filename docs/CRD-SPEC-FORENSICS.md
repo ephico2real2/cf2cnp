@@ -211,8 +211,8 @@ with the operator's own labels. cf2cnp hard-codes one rule (`kube-system`, `k8s-
 and the FQDN policy cuts the pod off from DNS.
 
 Design: the resolver rule is **derived from the observed DNS flows** when the input has them (the destination pod's
-namespace and identifying labels, the destination port and protocol as Hubble reports them; `ANY` when both UDP
-and TCP were seen), and from a **profile** otherwise — `--dns-profile auto` (default: from the flows, else
+namespace and identifying labels, the destination port as Hubble reports it; the protocol `ANY` — see the review
+corrections below, which changed this from "as observed"), and from a **profile** otherwise — `--dns-profile auto` (default: from the flows, else
 `kubernetes`), `kubernetes` (the docs' rule, `53/ANY`), `openshift` (`openshift-dns`, no `k8s-app` label, `5353/ANY`),
 and `--dns-resolver <namespace>[/<label>=<value>]:<port>` for any other resolver. The same value is used by
 `?dnsProfile=` on the API and a selector on the page. The description names what was written. Fixtures: the
@@ -222,7 +222,10 @@ Kubernetes DNS flow from the PoC's demo 31 and a synthesised OpenShift flow (des
 Review corrections (2026-09-13, `docs/REVIEW_ENH-003.md` in the PoC): the first head wrote the `kubernetes` profile
 as `53/UDP` where this section says `53/ANY` — the code now follows the design and Cilium's `dns-matchname.yaml`; a
 resolver derived from the flows keeps the protocols observed, so the goldens (all derived from UDP lookups) did not
-move. The derivation took every `kube-system` peer on 53/5353 as the resolver; it now takes CoreDNS / kube-dns and
+move — and then Codex refuted "as observed" for the derived rule too: a UDP-only rule denies the TCP retry of a
+truncated answer, a failure that appears only on the day a large answer comes; the derived rule is `ANY` as well,
+and the two goldens whose resolver rule 0.6.3 wrote as `UDP` were regenerated (`internal/testdata/golden/README.md`).
+The derivation took every `kube-system` peer on 53/5353 as the resolver; it now takes CoreDNS / kube-dns and
 NodeLocal DNSCache by their `k8s-app` label (under a Local Redirect Policy the lookups reach the NodeLocal pod, and
 the rule must name what the lookups reach) and OpenShift's operator by its namespace, nothing else. And `serve` takes
 the same two flags as a cluster-wide default (`dns.profile` / `dns.resolver` in the chart, which also drive the

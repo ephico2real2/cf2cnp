@@ -18,7 +18,8 @@ import (
 	"github.com/hubble-policy-gen/internal/render"
 
 	"github.com/cilium/cilium/pkg/policy/api"
-	"k8s.io/apimachinery/pkg/util/validation"
+	k8svalidation "k8s.io/apimachinery/pkg/api/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // ClusterLabel is the label Cilium puts on every endpoint of a ClusterMesh member and matches in
@@ -176,24 +177,95 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 // Sanitize checks the rule, not the object: the name is checked here as the API server does (a DNS-1123 subdomain;
 // the agent's own Parse refuses an empty one), and `specs` rule by rule (review ENH-003).
 func Validate(p *CiliumNetworkPolicy) error {
-	if errs := validation.IsDNS1123Subdomain(p.Metadata.Name); len(errs) > 0 {
-		return fmt.Errorf("%w %s/%s: metadata.name %q: %s", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, p.Metadata.Name, strings.Join(errs, "; "))
+	refuse := func(format string, a ...interface{}) error {
+		return fmt.Errorf("%w %s/%s: %s", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, fmt.Sprintf(format, a...))
+	}
+	// the API server's ObjectMeta checks (name and namespace DNS-1123, label keys and values, annotations, …); a
+	// namespaced policy without a namespace gets kubectl's default for the check, as kubectl would fill it
+	clusterwide := p.Kind == "CiliumClusterwideNetworkPolicy"
+	meta := p.Metadata.DeepCopy()
+	if meta.Namespace == "" && !clusterwide {
+		meta.Namespace = "default"
+	}
+	if errs := k8svalidation.ValidateObjectMeta(meta, !clusterwide, k8svalidation.NameIsDNSSubdomain, field.NewPath("metadata")); len(errs) > 0 {
+		return refuse("%v", errs.ToAggregate())
 	}
 	if len(p.Specs) == 0 || !reflect.DeepEqual(p.Spec, Rule{}) { // Cilium's Parse: spec, specs, or both; never neither
-		check := p.Spec.DeepCopy()
-		if err := check.Sanitize(); err != nil {
-			return fmt.Errorf("%w %s/%s: %w", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, err)
+		if err := validateRule(&p.Spec, "spec", clusterwide); err != nil {
+			return refuse("%v", err)
 		}
 	}
 	for i, r := range p.Specs {
 		if r == nil {
-			return fmt.Errorf("%w %s/%s: specs[%d] is empty", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, i)
+			return refuse("specs[%d] is empty", i)
 		}
-		if err := r.DeepCopy().Sanitize(); err != nil {
-			return fmt.Errorf("%w %s/%s: specs[%d]: %w", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, i, err)
+		if err := validateRule(r, fmt.Sprintf("specs[%d]", i), clusterwide); err != nil {
+			return refuse("%v", err)
 		}
 	}
 	return nil
+}
+
+// validateRule is what the agent and the CRD check on one rule beyond Sanitize: a namespaced policy cannot carry a
+// nodeSelector (cnp_types.go Parse), and the CRD's protocol enum is upper case only — Sanitize upper-cases on its
+// copy, the schema sees the file (review ENH-003, Codex).
+func validateRule(r *Rule, path string, clusterwide bool) error {
+	if !clusterwide && r.NodeSelector.LabelSelector != nil {
+		return fmt.Errorf("%s: rule cannot have NodeSelector", path)
+	}
+	groups := []struct {
+		path  string
+		ports api.PortsIterator
+	}{}
+	for i := range r.Ingress {
+		groups = append(groups, struct {
+			path  string
+			ports api.PortsIterator
+		}{fmt.Sprintf("%s.ingress[%d]", path, i), r.Ingress[i].ToPorts})
+	}
+	for i := range r.IngressDeny {
+		groups = append(groups, struct {
+			path  string
+			ports api.PortsIterator
+		}{fmt.Sprintf("%s.ingressDeny[%d]", path, i), r.IngressDeny[i].ToPorts})
+	}
+	for i := range r.Egress {
+		groups = append(groups, struct {
+			path  string
+			ports api.PortsIterator
+		}{fmt.Sprintf("%s.egress[%d]", path, i), r.Egress[i].ToPorts})
+	}
+	for i := range r.EgressDeny {
+		groups = append(groups, struct {
+			path  string
+			ports api.PortsIterator
+		}{fmt.Sprintf("%s.egressDeny[%d]", path, i), r.EgressDeny[i].ToPorts})
+	}
+	for _, g := range groups {
+		err := g.ports.Iterate(func(ports api.Ports) error {
+			for i, pp := range ports.GetPortProtocols() {
+				if !crdProtocols[pp.Protocol] {
+					return fmt.Errorf("%s.toPorts.ports[%d].protocol: %q is not in the CRD's enum (upper case: TCP, UDP, ANY, …)", g.path, i, pp.Protocol)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	check := r.DeepCopy()
+	if err := check.Sanitize(); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
+}
+
+// crdProtocols is the CRD's enum for ports[].protocol (internal/crd, `protocol:` enum), which Sanitize does not check
+// because it upper-cases first
+var crdProtocols = map[api.L4Proto]bool{
+	"": true, api.ProtoTCP: true, api.ProtoUDP: true, api.ProtoSCTP: true, api.ProtoVRRP: true, api.ProtoIGMP: true,
+	api.ProtoGRE: true, api.ProtoIPIP: true, api.ProtoIPv6: true, api.ProtoESP: true, api.ProtoAH: true, api.ProtoAny: true,
 }
 
 // MergePolicies folds policies that select the same workload into one, in first-seen order. Two
@@ -256,16 +328,32 @@ func dropShadowedDNSRule(rules []EgressRule, dnsRule EgressRule) []EgressRule {
 	if !shadowed {
 		return rules
 	}
-	plain := dnsRule.DeepCopy()
-	plain.ToPorts[0].Rules = nil
-	plainYAML := mustYAML(*plain)
 	kept := rules[:0]
 	for _, r := range rules {
-		if mustYAML(r) != plainYAML {
+		if !plainTwinOf(r, dnsRule) {
 			kept = append(kept, r)
 		}
 	}
 	return kept
+}
+
+// plainTwinOf says whether r is the DNS rule without its L7 block — the lookup's own plain rule. The resolver rule
+// is ANY (dns.go), so the plain twin may carry UDP, TCP, ANY or no protocol (review ENH-003, Codex).
+func plainTwinOf(r, dnsRule EgressRule) bool {
+	plain := dnsRule.DeepCopy()
+	plain.ToPorts[0].Rules = nil
+	protocols := []api.L4Proto{plain.ToPorts[0].Ports[0].Protocol}
+	if protocols[0] == api.ProtoAny {
+		protocols = []api.L4Proto{"", api.ProtoAny, api.ProtoTCP, api.ProtoUDP}
+	}
+	got := mustYAML(r)
+	for _, proto := range protocols {
+		plain.ToPorts[0].Ports[0].Protocol = proto
+		if got == mustYAML(*plain) {
+			return true
+		}
+	}
+	return false
 }
 
 func labelsKey(labels map[string]string) string {

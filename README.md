@@ -121,8 +121,9 @@ with `rules.dns` turns on. Where that DNS is differs by platform, and Cilium's D
 ("match the namespace openshift-dns instead of kube-system, remove the match on k8s-app=kube-dns, and change the port to
 5353"). cf2cnp derives the rule from the observed DNS flows when the input has them — the pods the workload asked
 (CoreDNS by its `k8s-app` label, NodeLocal DNSCache when a Local Redirect Policy sends the lookups there, OpenShift's
-DNS operator by its namespace), on the port and the protocols it used — and takes a profile otherwise. The profiles
-write `ANY`, as Cilium's own examples do: a lookup whose UDP answer is truncated retries over TCP.
+DNS operator by its namespace), on the port it used — and takes a profile otherwise. The rule's protocol is `ANY`
+either way, as Cilium's own examples write it: a lookup whose UDP answer is truncated retries over TCP, and a
+UDP-only rule denies that retry under default-deny egress.
 
 ```bash
 cf2cnp generate -i flows.ndjson -o out --dns-profile auto        # default: from the flows, else kubernetes

@@ -11,3 +11,7 @@ Regenerate with `hack/golden/regenerate.sh <binary>`.
 - `31-pos-egress-cidr` (regenerated with 0.7.0): 0.6.3 printed the "The DNS rule below turns the DNS proxy on …"
   comment under the CIDR whenever the document mentioned `k8s-app: kube-dns` — here that was the **plain** 53/UDP rule
   the pod's own lookup produced, which turns no proxy on. The comment is now tied to an actual `rules.dns` block.
+- `31-pos-fqdn`, `31-pos-dns-visibility` (regenerated on the review of 0.7.0, Codex C9): the resolver rule's
+  protocol is `ANY`, not the observed `UDP` — a lookup whose UDP answer is truncated retries over TCP, and the
+  UDP-only rule 0.6.3 wrote denies that retry under default-deny egress. Cilium's own examples write `ANY`. The
+  description says `ANY/53`.

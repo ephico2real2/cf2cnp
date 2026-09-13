@@ -53,7 +53,7 @@ func TestLooksLikeDNS_NotTheWholeOfKubeSystem(t *testing.T) {
 
 // Review ENH-003 (Cursor, finding 4): Cilium's own Kubernetes example (examples/kubernetes-dns/dns-matchname.yaml)
 // writes the resolver rule as 53/ANY, and a lookup whose UDP answer is truncated retries over TCP; the kubernetes
-// profile follows the guide. A resolver DERIVED from the flows keeps the protocols observed (the goldens: UDP).
+// profile follows the guide (and, after Codex's C9, so does a resolver derived from the flows: TestDerivedDNSResolver_IsANY).
 func TestDNSProfiles_FollowCiliumGuide(t *testing.T) {
 	if r := dnsProfiles[DNSProfileKubernetes]; r.Port != "53" || r.Protocol != "ANY" || r.Labels["k8s-app"] != "kube-dns" || r.Namespace != "kube-system" {
 		t.Fatalf("kubernetes profile: %+v", r)

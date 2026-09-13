@@ -18,10 +18,13 @@ import (
 // order lists, per mapping, the keys that come first and in which order. A mapping is named by its key in the parent
 // ("" is the document); a key not listed sorts after the listed ones, lexicographically. Sequences pass the parent's
 // name through, so every ingress rule is ordered as "ingress".
+var ruleOrder = []string{"description", "endpointSelector", "nodeSelector", "enableDefaultDeny", "ingress", "ingressDeny", "egress", "egressDeny", "labels", "log"}
+
 var order = map[string][]string{
 	"":                  {"apiVersion", "kind", "metadata", "spec", "specs"},
 	"metadata":          {"name", "namespace", "labels", "annotations"},
-	"spec":              {"description", "endpointSelector", "nodeSelector", "enableDefaultDeny", "ingress", "ingressDeny", "egress", "egressDeny", "labels", "log"},
+	"spec":              ruleOrder,
+	"specs":             ruleOrder, // Cilium's list form: each rule in the same order (review ENH-003)
 	"endpointSelector":  {"matchLabels", "matchExpressions"},
 	"nodeSelector":      {"matchLabels", "matchExpressions"},
 	"ingress":           {"fromEndpoints", "fromEntities", "fromCIDR", "fromCIDRSet", "fromNodes", "fromGroups", "fromRequires", "toPorts", "icmps", "authentication"},
