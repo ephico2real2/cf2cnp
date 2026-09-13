@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/hubble-policy-gen/internal/aggregator"
 	"github.com/hubble-policy-gen/internal/flow"
@@ -14,15 +15,17 @@ import (
 )
 
 var (
-	inputDir      string
-	outputDir     string
-	port          int
-	externalURL   string
-	l7            bool
-	dnsVisibility bool
-	existingFile  string
-	outputFile    string
-	yoloNamespace string
+	inputDir       string
+	outputDir      string
+	port           int
+	externalURL    string
+	l7             bool
+	dnsVisibility  bool
+	existingFile   string
+	outputFile     string
+	yoloNamespace  string
+	allowedOrigins string
+	authToken      string
 )
 
 func main() {
@@ -78,6 +81,10 @@ Endpoints:
 		"Base URL clients reach the server at (e.g. https://cf2cnp.example.com); used for download_url. "+
 			"Default: derived from the request and its Forwarded / X-Forwarded-Proto / X-Forwarded-Host headers. "+
 			"Env: CF2CNP_EXTERNAL_URL")
+	serveCmd.Flags().StringVar(&allowedOrigins, "allowed-origins", os.Getenv("CF2CNP_ALLOWED_ORIGINS"),
+		"Comma-separated origins allowed by CORS (e.g. https://grafana.example.com). Empty or * = any origin. Env: CF2CNP_ALLOWED_ORIGINS")
+	serveCmd.Flags().StringVar(&authToken, "auth-token", os.Getenv("CF2CNP_AUTH_TOKEN"),
+		"When set, /generate and /download require Authorization: Bearer <token>. Env: CF2CNP_AUTH_TOKEN (prefer the env)")
 
 	// YOLO command (easter egg)
 	yoloCmd := &cobra.Command{
@@ -183,7 +190,13 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	srv := server.NewServer(port, externalURL)
+	var origins []string
+	for _, o := range strings.Split(allowedOrigins, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	srv := server.NewServerWithOptions(port, externalURL, server.Options{AllowedOrigins: origins, AuthToken: authToken})
 	return srv.Start()
 }
 

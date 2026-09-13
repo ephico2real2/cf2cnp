@@ -39,12 +39,31 @@ spec:
             - --external-url
             - {{ .Values.externalURL | quote }}
             {{- end }}
+            {{- with .Values.cors.allowedOrigins }}
+            - --allowed-origins
+            - {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with .Values.extraEnv }}
+          {{- if or .Values.extraEnv .Values.auth.token .Values.auth.existingSecret }}
           env:
+            {{- if .Values.auth.existingSecret }}
+            - name: CF2CNP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: token
+            {{- else if .Values.auth.token }}
+            - name: CF2CNP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cf2cnp.fullname" . }}-auth
+                  key: token
+            {{- end }}
+            {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           ports:
             - name: http

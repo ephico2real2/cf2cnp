@@ -1,0 +1,38 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "cf2cnp.fullname" . }}
+  labels:
+    {{- include "cf2cnp.labels" . | nindent 4 }}
+spec:
+  description: cf2cnp — reachable from the Gateway (reserved:ingress), the kubelet's probes (reserved:host) and the listed endpoints only; egress to kube-dns only
+  endpointSelector:
+    matchLabels:
+      {{- include "cf2cnp.selectorLabels" . | nindent 6 }}
+  ingress:
+    # measured on Cilium 1.20.1 with Gateway API: a request through the Gateway reaches the pod as reserved:ingress;
+    # the kubelet's liveness/readiness probes reach it as reserved:host — without host, the pod fails its probes
+    - fromEntities: [ingress, host]
+      toPorts:
+        - ports:
+            - port: {{ .Values.containerPort | quote }}
+              protocol: TCP
+    {{- with .Values.networkPolicy.fromEndpoints }}
+    - fromEndpoints:
+        {{- toYaml . | nindent 8 }}
+      toPorts:
+        - ports:
+            - port: {{ $.Values.containerPort | quote }}
+              protocol: TCP
+    {{- end }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+{{- end }}

@@ -257,3 +257,78 @@ func TestExclude_WholeLabelSetAndSingleLabel(t *testing.T) {
 		i += j
 	}
 }
+
+// E6: CORS — any origin by default; a listed origin is echoed with Vary; an unlisted one gets no allow header
+func TestCORS_AllowedOrigins(t *testing.T) {
+	flow := fixture(t, "ingress-pos-to-shop.json")
+	open := NewServer(8080, "")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(flow))
+	req.Header.Set("Origin", "https://anything.example")
+	open.corsMiddleware(open.handleGenerate)(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("default must be *: %v", rec.Header())
+	}
+	strict := NewServerWithOptions(8080, "", Options{AllowedOrigins: []string{"https://grafana.poc.local"}})
+	for origin, want := range map[string]string{"https://grafana.poc.local": "https://grafana.poc.local", "https://evil.example": ""} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodOptions, "/generate", nil)
+		req.Header.Set("Origin", origin)
+		strict.corsMiddleware(strict.handleGenerate)(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != want {
+			t.Fatalf("origin %s: got %q want %q", origin, got, want)
+		}
+		if want != "" && rec.Header().Get("Vary") != "Origin" {
+			t.Fatalf("a listed origin must set Vary: Origin")
+		}
+	}
+}
+
+// E6: the bearer token guards /generate and /download, not /health; preflight passes; wrong token is 401
+func TestAuthToken(t *testing.T) {
+	s := NewServerWithOptions(8080, "", Options{AuthToken: "s3cret"})
+	flow := fixture(t, "ingress-pos-to-shop.json")
+	call := func(method, path, token string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(flow))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		s.corsMiddleware(s.requireToken(s.handleGenerate))(rec, req)
+		return rec
+	}
+	if rec := call(http.MethodPost, "/generate", ""); rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") == "" {
+		t.Fatalf("no token: %d %v", rec.Code, rec.Header())
+	}
+	if rec := call(http.MethodPost, "/generate", "wrong"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: %d", rec.Code)
+	}
+	if rec := call(http.MethodPost, "/generate", "s3cret"); rec.Code != http.StatusOK {
+		t.Fatalf("right token: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodOptions, "/generate", ""); rec.Code != http.StatusOK {
+		t.Fatalf("preflight must not be challenged: %d", rec.Code)
+	}
+	rec := httptest.NewRecorder()
+	s.handleHealth(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/health is open: %d", rec.Code)
+	}
+}
+
+// Review finding: the scheme is case-insensitive, and a wrong token of ANY length is refused the same way
+func TestAuthToken_SchemeCaseAndLengths(t *testing.T) {
+	s := NewServerWithOptions(8080, "", Options{AuthToken: "s3cret"})
+	flow := fixture(t, "ingress-pos-to-shop.json")
+	for header, want := range map[string]int{"bearer s3cret": 200, "BEARER s3cret": 200, "Bearer s3cret": 200, "Bearer s3cre": 401, "Bearer s3cret-and-more": 401, "Basic s3cret": 401, "": 401} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(flow))
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		s.corsMiddleware(s.requireToken(s.handleGenerate))(rec, req)
+		if rec.Code != want {
+			t.Fatalf("%q: got %d want %d", header, rec.Code, want)
+		}
+	}
+}
