@@ -151,8 +151,15 @@ schema, embedded from the module's file, checked in CI on every fixture and on t
 `kubectl-validate --local-crds` (the E10 template's mechanism). The generator itself normalises what `Sanitize`
 would only fix on the copy (protocol upper-case) so the rendered document is what the agent would accept.
 
-**Rendering.** `sigs.k8s.io/yaml` for the documents; the comment lines cf2cnp adds (`# To allow all traffic to
-world …`) stay text-based, as today; `merge` unchanged (YAML nodes). Golden files: every policy under the PoC's
+**Rendering — researched.** `sigs.k8s.io/yaml` marshals Kubernetes types through JSON and orders keys alphabetically
+(it "does not respect original mapping key order"); tools that write Kubernetes YAML for humans own a canonical order
+instead — kustomize/kpt's `kyaml` formatter orders "commonly encountered Resource fields" by a precedence list and
+sorts the rest lexicographically. cf2cnp does the same: marshal with `sigs.k8s.io/yaml`, load the JSON into a
+`yaml.v3` node tree, re-order by a cf2cnp-owned precedence table (`apiVersion, kind, metadata{name, namespace, labels,
+annotations}, spec{description, endpointSelector, nodeSelector, enableDefaultDeny, ingress, egress, ingressDeny,
+egressDeny, labels, log}`; a rule's `from*`/`to*` before `toPorts`, `icmps`, `authentication`; a port's `port, endPort,
+protocol`, then `rules`; unknown keys lexicographically), add the comment lines as node comments, encode with a 2-space
+indent. Today's layout is preserved exactly, so the golden tests demand byte identity; `merge` is unchanged (nodes). Golden files: every policy under the PoC's
 `demos/2[6-9]*/policies` and `demos/3*/policies` regenerated from its saved flows and diffed — the only accepted
 differences are key order within `metadata` and the fields the new generator adds.
 
@@ -184,7 +191,26 @@ becomes a cf2cnp release with a known diff.
 - **Behaviour changes on the swap.** Caught by the golden tests over 40+ real policies from the demos; the review
   brief for E12 lists them as claims.
 
-## 6. Out of scope, noted
+## 6. The DNS resolver rule — derived from flows, with platform profiles
+
+Cilium's DNS-policy guide gives the resolver rule for Kubernetes and adds, verbatim: "OpenShift users will need to
+modify the policies to match the namespace `openshift-dns` (instead of `kube-system`), remove the match on the
+`k8s:k8s-app=kube-dns` label, and change the port to 5353." OpenShift's DNS operator runs CoreDNS as the DaemonSet
+`dns-default` in `openshift-dns` listening on **5353** (`dns`/UDP, `dns-tcp`/TCP) behind the Service `dns-default:53`,
+with the operator's own labels. cf2cnp hard-codes one rule (`kube-system`, `k8s-app: kube-dns`, `53/UDP`) in
+`dnsVisibilityRule()` for both the `toFQDNs` path and `--dns-visibility`; on OpenShift that rule selects nothing
+and the FQDN policy cuts the pod off from DNS.
+
+Design: the resolver rule is **derived from the observed DNS flows** when the input has them (the destination pod's
+namespace and identifying labels, the destination port and protocol as Hubble reports them; `ANY` when both UDP
+and TCP were seen), and from a **profile** otherwise — `--dns-profile auto` (default: from the flows, else
+`kubernetes`), `kubernetes` (the docs' rule, `53/ANY`), `openshift` (`openshift-dns`, no `k8s-app` label, `5353/ANY`),
+and `--dns-resolver <namespace>[/<label>=<value>]:<port>` for any other resolver. The same value is used by
+`?dnsProfile=` on the API and a selector on the page. The description names what was written. Fixtures: the
+Kubernetes DNS flow from the PoC's demo 31 and a synthesised OpenShift flow (destination in `openshift-dns`, labels
+`dns.operator.openshift.io/daemonset-dns=default`, port 5353).
+
+## 7. Out of scope, noted
 
 CiliumClusterwideNetworkPolicy shares the rule types (`api.Rule` with `nodeSelector`); emitting it for
 `reserved:host` flows is a later item. `CiliumCIDRGroup` references (`cidrGroupRef`) and cloud `toGroups` are not
