@@ -46,8 +46,8 @@ func TestBuildPolicies_MergesSameWorkload(t *testing.T) {
 	if peers != "pos,stranger" {
 		t.Fatalf("rules must keep first-seen order, got %s", peers)
 	}
-	if !strings.Contains(p.Spec.Description, "2 rules merged from 2 observed flows") {
-		t.Fatalf("description must say what was merged, got %q", p.Spec.Description)
+	if p.Spec.Description != "Allow ingress to shop in cf2cnp-lab: from pos on TCP/80; from stranger on TCP/80" {
+		t.Fatalf("the description must say what the rules say, got %q", p.Spec.Description)
 	}
 }
 

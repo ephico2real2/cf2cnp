@@ -191,9 +191,7 @@ func MergePolicies(policies []*CiliumNetworkPolicy) []*CiliumNetworkPolicy {
 	for _, key := range order {
 		p := byKey[key]
 		p.Spec.Egress = dropShadowedDNSRule(p.Spec.Egress)
-		if n := merged[key]; n > 0 {
-			p.Spec.Description = mergedDescription(p, n+1)
-		}
+		p.Spec.Description = Describe(p) // from the final rules, merged or not (0.6.2: the per-flow sentence said only the namespaces)
 		result = append(result, p)
 	}
 	return result
@@ -226,20 +224,6 @@ func dropShadowedDNSRule(rules []EgressRule) []EgressRule {
 		}
 	}
 	return kept
-}
-
-func mergedDescription(p *CiliumNetworkPolicy, flows int) string {
-	var dir string
-	switch {
-	case len(p.Spec.Ingress) > 0 && len(p.Spec.Egress) > 0:
-		dir = "ingress and egress"
-	case len(p.Spec.Egress) > 0:
-		dir = "egress"
-	default:
-		dir = "ingress"
-	}
-	return fmt.Sprintf("Allow %s traffic for the %s in %s (%d rules merged from %d observed flows)",
-		dir, p.Metadata.Name, p.Metadata.Namespace, len(p.Spec.Ingress)+len(p.Spec.Egress), flows)
 }
 
 func labelsKey(labels map[string]string) string {
