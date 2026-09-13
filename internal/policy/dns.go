@@ -12,7 +12,7 @@ import (
 
 // The DNS resolver rule — the egress rule that lets the selected endpoints ask the cluster's DNS and puts their
 // lookups through Cilium's DNS proxy, which every toFQDNs rule needs and --dns-visibility asks for — used to be one
-// hard-coded shape: kube-system, k8s-app=kube-dns, 53/UDP. That is a kind or kubeadm cluster. OpenShift's DNS
+// hard-coded shape: kube-system, k8s-app=kube-dns, 53/UDP. That is a kind or kubeadm cluster (and UDP alone). OpenShift's DNS
 // operator runs CoreDNS in openshift-dns, listening on 5353, without that label, and Cilium's own guide says so:
 // "OpenShift users will need to modify the policies to match the namespace openshift-dns (instead of kube-system),
 // remove the match on the k8s:k8s-app=kube-dns label, and change the port to 5353". A policy with the wrong resolver
@@ -32,12 +32,15 @@ type DNSResolver struct {
 // DNS profiles: what to write when the flows do not show the resolver
 const (
 	DNSProfileAuto       = "auto"       // from the flows, else kubernetes
-	DNSProfileKubernetes = "kubernetes" // kube-system, k8s-app=kube-dns, 53/UDP — what cf2cnp always wrote
+	DNSProfileKubernetes = "kubernetes" // kube-system, k8s-app=kube-dns, 53/ANY — Cilium's DNS guide (dns-matchname.yaml)
 	DNSProfileOpenShift  = "openshift"  // openshift-dns, no label, 5353/ANY — Cilium's DNS guide for OpenShift
 )
 
+// The profiles write ANY, as Cilium's examples do: a lookup whose UDP answer is truncated retries over TCP, and a
+// rule with UDP alone denies that retry under default-deny egress. (0.6.x wrote 53/UDP; a resolver DERIVED from the
+// flows keeps the protocols observed, so the goldens, all derived from UDP lookups, are unchanged.)
 var dnsProfiles = map[string]DNSResolver{
-	DNSProfileKubernetes: {Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}, Port: "53", Protocol: "UDP"},
+	DNSProfileKubernetes: {Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}, Port: "53", Protocol: "ANY"},
 	DNSProfileOpenShift:  {Namespace: "openshift-dns", Port: "5353", Protocol: "ANY"},
 }
 
@@ -55,7 +58,7 @@ func (g *Generator) WithDNSProfile(name string) (*Generator, error) {
 }
 
 // WithDNSResolver names the resolver explicitly: "<namespace>[/<label>=<value>[,<label>=<value>]]:<port>[/<protocol>]",
-// e.g. "kube-system/k8s-app=kube-dns:53/UDP" or "openshift-dns:5353/ANY"
+// e.g. "kube-system/k8s-app=kube-dns:53/UDP" or "openshift-dns:5353" (no protocol: ANY)
 func (g *Generator) WithDNSResolver(spec string) (*Generator, error) {
 	r, err := ParseDNSResolver(spec)
 	if err != nil {
@@ -73,7 +76,7 @@ func ParseDNSResolver(spec string) (DNSResolver, error) {
 		return r, fmt.Errorf("dns resolver %q: want <namespace>[/<label>=<value>]:<port>[/<protocol>]", spec)
 	}
 	where, portProto := spec[:i], spec[i+1:]
-	r.Port, r.Protocol = portProto, "UDP"
+	r.Port, r.Protocol = portProto, "ANY" // no protocol named: both, as Cilium's examples write it
 	if j := strings.Index(portProto, "/"); j > 0 {
 		r.Port, r.Protocol = portProto[:j], strings.ToUpper(portProto[j+1:])
 	}
@@ -151,11 +154,16 @@ func DeriveDNSResolver(flows []*aggregator.AggregatedFlow) (DNSResolver, bool) {
 	return *found, true
 }
 
+// looksLikeDNS says whether a peer on a DNS port is the resolver: CoreDNS / kube-dns by its label, NodeLocal DNSCache
+// by its label (under a Local Redirect Policy the lookups reach that pod, so the rule must name it — a rule naming
+// kube-dns would cut the pod off), or OpenShift's DNS operator by its namespace (its pods carry no k8s-app label,
+// Cilium's DNS guide). Anything else in kube-system on 53 is not the resolver (review ENH-003).
 func looksLikeDNS(namespace string, labels map[string]string) bool {
-	if labels["k8s-app"] == "kube-dns" || labels["k8s-app"] == "coredns" {
+	switch labels["k8s-app"] {
+	case "kube-dns", "coredns", "node-local-dns":
 		return true
 	}
-	return namespace == "kube-system" || namespace == "openshift-dns"
+	return namespace == "openshift-dns"
 }
 
 // dnsRule is the egress rule for the resolver in use: the pods it names on their port, with the L7 DNS rule that

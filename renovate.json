@@ -4,7 +4,7 @@
   "postUpdateOptions": ["gomodTidy"],
   "packageRules": [
     {
-      "description": "The Cilium module IS the policy spec cf2cnp supports: a bump is a release. The PR must re-run `go generate ./internal/crd` (the embedded CRD follows the module) and the golden tests.",
+      "description": "The Cilium module IS the policy spec cf2cnp supports: a bump is a release. The embedded CRD follows the module: run `go generate ./internal/crd` on the bump and commit it. Hosted Renovate (the Mend GitHub App) does NOT run postUpgradeTasks — they run on a self-hosted Renovate only, and only when the command is on its allowedCommands — so CI is the guard: TestEmbeddedCRDVersionMatchesModule and the byte-for-byte cmp fail the PR until the copy is refreshed.",
       "matchDatasources": ["go"],
       "matchPackageNames": ["github.com/cilium/cilium"],
       "groupName": "cilium policy API (the supported CiliumNetworkPolicy spec)",

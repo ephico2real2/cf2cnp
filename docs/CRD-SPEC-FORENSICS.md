@@ -90,6 +90,13 @@ model, but which the *generator* cannot emit.
   was wrong and is withdrawn.
 - `Port.Protocol` is written as observed (`TCP`/`UDP`); nothing upper-cases a lower-case value. The CRD's enum is
   upper-case only (measured below: `"tcp"` is rejected by the schema).
+- **Found by the review (2026-09-13, Cursor and Codex independently):** the parser knew one world label,
+  `reserved:world`. On a dual-stack Cilium (both address families enabled) an address outside the cluster carries
+  `reserved:world-ipv4` or `reserved:world-ipv6` instead — `pkg/labels/cidr.go` `getWorldLabel`, identities 9 and 10
+  (`cilium-dbg identity list` on the PoC's IPv4-only cluster lists all three as reserved) — and all three are the
+  `world` entity of a policy (`NumericIdentity.IsWorld`). 0.6.x and the first 0.7.0 head parsed such a peer as
+  neither world nor entity, so an egress to it produced no `toCIDR` and no `toEntities`. Fixed on the review:
+  `worldLabels` in the parser, fixtures `egress-pos-to-world-ipv4.json`, `ingress-world-ipv4-cidr-to-receiver.json`.
 
 ## 3. Can cf2cnp consume Cilium's own spec? Measured
 
@@ -211,6 +218,15 @@ and `--dns-resolver <namespace>[/<label>=<value>]:<port>` for any other resolver
 `?dnsProfile=` on the API and a selector on the page. The description names what was written. Fixtures: the
 Kubernetes DNS flow from the PoC's demo 31 and a synthesised OpenShift flow (destination in `openshift-dns`, labels
 `dns.operator.openshift.io/daemonset-dns=default`, port 5353).
+
+Review corrections (2026-09-13, `docs/REVIEW_ENH-003.md` in the PoC): the first head wrote the `kubernetes` profile
+as `53/UDP` where this section says `53/ANY` — the code now follows the design and Cilium's `dns-matchname.yaml`; a
+resolver derived from the flows keeps the protocols observed, so the goldens (all derived from UDP lookups) did not
+move. The derivation took every `kube-system` peer on 53/5353 as the resolver; it now takes CoreDNS / kube-dns and
+NodeLocal DNSCache by their `k8s-app` label (under a Local Redirect Policy the lookups reach the NodeLocal pod, and
+the rule must name what the lookups reach) and OpenShift's operator by its namespace, nothing else. And `serve` takes
+the same two flags as a cluster-wide default (`dns.profile` / `dns.resolver` in the chart, which also drive the
+chart's own policy's DNS egress rule), because a Grafana action on OpenShift sends no `?dnsProfile=`.
 
 ## 7. Out of scope, noted
 

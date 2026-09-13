@@ -274,10 +274,15 @@ func extractLabels(labels []string) map[string]string {
 	return result
 }
 
+// worldLabels are the labels Cilium gives an address outside the cluster: reserved:world on a single-stack cluster,
+// reserved:world-ipv4 / reserved:world-ipv6 when both address families are enabled (pkg/labels/cidr.go getWorldLabel,
+// identities 2, 9 and 10). All three are the `world` entity of a policy (NumericIdentity.IsWorld).
+var worldLabels = map[string]bool{"reserved:world": true, "reserved:world-ipv4": true, "reserved:world-ipv6": true}
+
 // isWorldTraffic checks if the endpoint is external "world" traffic
 func isWorldTraffic(labels []string) bool {
 	for _, label := range labels {
-		if label == "reserved:world" {
+		if worldLabels[label] {
 			return true
 		}
 	}
@@ -290,6 +295,8 @@ var reservedEntities = map[string]string{
 	"reserved:host":           "host",
 	"reserved:remote-node":    "remote-node",
 	"reserved:world":          "world",
+	"reserved:world-ipv4":     "world", // dual-stack (see worldLabels)
+	"reserved:world-ipv6":     "world",
 	"reserved:health":         "health",
 	"reserved:init":           "init",
 	"reserved:ingress":        "ingress",

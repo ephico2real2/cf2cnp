@@ -70,8 +70,22 @@ networkPolicy:
   # label in its selector (review finding — a bare label matches the release namespace only), e.g.
   #   - matchLabels: {app.kubernetes.io/name: grafana, io.kubernetes.pod.namespace: monitoring}
   fromEndpoints: []
+  # The egress rule to the cluster's DNS follows dns.profile (kube-dns 53/ANY, or openshift-dns 5353/ANY). When
+  # dns.resolver names other pods, write the rule for them here (one CiliumNetworkPolicy egress rule), e.g.
+  #   toEndpoints: [{matchLabels: {io.kubernetes.pod.namespace: dns-system, app: coredns}}]
+  #   toPorts: [{ports: [{port: "5353", protocol: ANY}]}]
+  dnsEgress: {}
 
 # Extra arguments appended to `cf2cnp serve --port <containerPort>` (e.g. a flag this chart has no value for)
+# The DNS resolver rule (0.7.0) a request gets when it does not name one (?dnsProfile= / ?dnsResolver=): the rule
+# toFQDNs and DNS visibility write. auto = derived from the observed DNS flows, else kubernetes (kube-system,
+# k8s-app=kube-dns, 53/ANY). On OpenShift set profile: openshift (openshift-dns, 5353/ANY, no k8s-app label —
+# Cilium's DNS guide), or name any resolver: resolver: "dns-system/app=coredns:5353/ANY". The chart's own
+# CiliumNetworkPolicy (networkPolicy.enabled) lets the pod reach the resolver the profile names.
+dns:
+  profile: auto
+  resolver: ""
+
 extraArgs: []
 
 # Extra environment variables for the container (list of EnvVar; CF2CNP_EXTERNAL_URL is an alternative to externalURL)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/hubble-policy-gen/internal/render"
 
 	"github.com/cilium/cilium/pkg/policy/api"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // ClusterLabel is the label Cilium puts on every endpoint of a ClusterMesh member and matches in
@@ -170,10 +172,26 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 // on a deep copy: Sanitize also normalises what it checks (selector keys get Cilium's label-source prefix, the protocol
 // is upper-cased, enableDefaultDeny is filled), and none of that belongs in the document a user reads
 // (docs/CRD-SPEC-FORENSICS.md §3, probes 2 and 3).
+//
+// Sanitize checks the rule, not the object: the name is checked here as the API server does (a DNS-1123 subdomain;
+// the agent's own Parse refuses an empty one), and `specs` rule by rule (review ENH-003).
 func Validate(p *CiliumNetworkPolicy) error {
-	check := p.Spec.DeepCopy()
-	if err := check.Sanitize(); err != nil {
-		return fmt.Errorf("%w %s/%s: %w", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, err)
+	if errs := validation.IsDNS1123Subdomain(p.Metadata.Name); len(errs) > 0 {
+		return fmt.Errorf("%w %s/%s: metadata.name %q: %s", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, p.Metadata.Name, strings.Join(errs, "; "))
+	}
+	if len(p.Specs) == 0 || !reflect.DeepEqual(p.Spec, Rule{}) { // Cilium's Parse: spec, specs, or both; never neither
+		check := p.Spec.DeepCopy()
+		if err := check.Sanitize(); err != nil {
+			return fmt.Errorf("%w %s/%s: %w", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, err)
+		}
+	}
+	for i, r := range p.Specs {
+		if r == nil {
+			return fmt.Errorf("%w %s/%s: specs[%d] is empty", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, i)
+		}
+		if err := r.DeepCopy().Sanitize(); err != nil {
+			return fmt.Errorf("%w %s/%s: specs[%d]: %w", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, i, err)
+		}
 	}
 	return nil
 }

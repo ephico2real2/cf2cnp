@@ -14,7 +14,6 @@ import (
 	"github.com/hubble-policy-gen/internal/policy"
 	"github.com/hubble-policy-gen/internal/server"
 	"github.com/spf13/cobra"
-	sigsyaml "sigs.k8s.io/yaml"
 )
 
 // version is set at build time: -ldflags "-X main.version=<tag>" (the release workflow and the Dockerfile do)
@@ -34,6 +33,11 @@ var (
 	authToken      string
 	dnsProfile     string
 	dnsResolver    string
+	// serve has its own pair: cobra's StringVar sets the variable to the flag's default at registration, so a variable
+	// shared with generate/merge would be reset to "auto" by whichever command registers last (measured: the env
+	// default was lost)
+	serveDNSProfile  string
+	serveDNSResolver string
 )
 
 func main() {
@@ -66,8 +70,8 @@ or use the 'serve' command to run as an HTTP server.`,
 	generateCmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory for generated CiliumNetworkPolicy YAML files (required)")
 	generateCmd.Flags().BoolVar(&l7, "l7", false, "Emit layer-7 rules (HTTP method+path, DNS names) from the flows' l7 records; the port then goes through the proxy")
 	generateCmd.Flags().BoolVar(&dnsVisibility, "dns-visibility", false, "For world traffic without DNS names, add the kube-dns L7 DNS rule so the next flows carry names (toFQDNs on the next run)")
-	generateCmd.Flags().StringVar(&dnsProfile, "dns-profile", "auto", "The DNS resolver rule toFQDNs and --dns-visibility write: auto (from the observed DNS flows, else kubernetes), kubernetes (kube-system, k8s-app=kube-dns, 53/UDP), openshift (openshift-dns, 5353/ANY)")
-	generateCmd.Flags().StringVar(&dnsResolver, "dns-resolver", "", "The DNS resolver explicitly, over --dns-profile: <namespace>[/<label>=<value>]:<port>[/<protocol>], e.g. openshift-dns:5353/ANY")
+	generateCmd.Flags().StringVar(&dnsProfile, "dns-profile", "auto", "The DNS resolver rule toFQDNs and --dns-visibility write: auto (from the observed DNS flows, else kubernetes), kubernetes (kube-system, k8s-app=kube-dns, 53/ANY), openshift (openshift-dns, 5353/ANY)")
+	generateCmd.Flags().StringVar(&dnsResolver, "dns-resolver", "", "The DNS resolver explicitly, over --dns-profile: <namespace>[/<label>=<value>]:<port>[/<protocol>], e.g. openshift-dns:5353/ANY (no protocol: ANY)")
 	generateCmd.MarkFlagRequired("input")
 	generateCmd.MarkFlagRequired("output")
 
@@ -96,6 +100,10 @@ Endpoints:
 		"Comma-separated origins allowed by CORS (e.g. https://grafana.example.com). Empty or * = any origin. Env: CF2CNP_ALLOWED_ORIGINS")
 	serveCmd.Flags().StringVar(&authToken, "auth-token", os.Getenv("CF2CNP_AUTH_TOKEN"),
 		"When set, /generate and /download require Authorization: Bearer <token>. Env: CF2CNP_AUTH_TOKEN (prefer the env)")
+	serveCmd.Flags().StringVar(&serveDNSProfile, "dns-profile", envOr("CF2CNP_DNS_PROFILE", "auto"),
+		"The DNS resolver profile a request gets when it omits ?dnsProfile= (see generate --dns-profile). Env: CF2CNP_DNS_PROFILE")
+	serveCmd.Flags().StringVar(&serveDNSResolver, "dns-resolver", os.Getenv("CF2CNP_DNS_RESOLVER"),
+		"The DNS resolver a request gets when it omits ?dnsResolver= (see generate --dns-resolver). Env: CF2CNP_DNS_RESOLVER")
 
 	// YOLO command (easter egg)
 	yoloCmd := &cobra.Command{
@@ -229,8 +237,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 			origins = append(origins, o)
 		}
 	}
-	srv := server.NewServerWithOptions(port, externalURL, server.Options{AllowedOrigins: origins, AuthToken: authToken})
+	// refuse a bad default at start, not per request
+	if _, err := policy.NewGenerator("").WithDNSProfile(serveDNSProfile); err != nil {
+		return err
+	}
+	if serveDNSResolver != "" {
+		if _, err := policy.ParseDNSResolver(serveDNSResolver); err != nil {
+			return err
+		}
+	}
+	srv := server.NewServerWithOptions(port, externalURL, server.Options{
+		AllowedOrigins: origins, AuthToken: authToken, DNSProfile: serveDNSProfile, DNSResolver: serveDNSResolver,
+	})
 	return srv.Start()
+}
+
+// envOr is an environment variable's value, or the default when it is unset or empty
+func envOr(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
 }
 
 // readFlows reads a flows file or every .json file of a directory
@@ -308,22 +335,18 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		for i, doc := range strings.Split(string(b), "\n---") {
-			if strings.TrimSpace(doc) == "" {
-				continue
-			}
-			var p policy.CiliumNetworkPolicy
-			if err := sigsyaml.Unmarshal([]byte(doc), &p); err != nil {
-				fmt.Printf("%s (document %d): cannot parse: %v\n", path, i+1, err)
-				failed++
-				continue
-			}
+		docs, err := policy.DecodePolicyDocuments(b)
+		if err != nil {
+			fmt.Printf("%s: cannot parse: %v\n", path, err)
+			failed++
+		}
+		for i, p := range docs {
 			if p.Kind != "CiliumNetworkPolicy" && p.Kind != "CiliumClusterwideNetworkPolicy" {
 				fmt.Printf("%s (document %d): kind %q is not a Cilium policy\n", path, i+1, p.Kind)
 				failed++
 				continue
 			}
-			if err := policy.Validate(&p); err != nil {
+			if err := policy.Validate(p); err != nil {
 				fmt.Printf("%s (document %d): %v\n", path, i+1, err)
 				failed++
 				continue

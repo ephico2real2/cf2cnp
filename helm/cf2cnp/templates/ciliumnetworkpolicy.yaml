@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "cf2cnp.labels" . | nindent 4 }}
 spec:
-  description: cf2cnp — reachable from the Gateway (reserved:ingress), the kubelet's probes (reserved:host) and the listed endpoints only; egress to kube-dns only
+  description: cf2cnp — reachable from the Gateway (reserved:ingress), the kubelet's probes (reserved:host) and the listed endpoints only; egress to the cluster's DNS only
   endpointSelector:
     matchLabels:
       {{- include "cf2cnp.selectorLabels" . | nindent 6 }}
@@ -27,6 +27,19 @@ spec:
               protocol: TCP
     {{- end }}
   egress:
+    # the resolver the dns.profile names (Cilium's DNS guide: OpenShift's DNS operator runs in openshift-dns on 5353
+    # without the k8s-app label). A custom dns.resolver names pods this rule does not know: set networkPolicy.dnsEgress.
+    {{- if .Values.networkPolicy.dnsEgress }}
+    {{- toYaml (list .Values.networkPolicy.dnsEgress) | nindent 4 }}
+    {{- else if eq .Values.dns.profile "openshift" }}
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: openshift-dns
+      toPorts:
+        - ports:
+            - port: "5353"
+              protocol: ANY
+    {{- else }}
     - toEndpoints:
         - matchLabels:
             io.kubernetes.pod.namespace: kube-system
@@ -34,5 +47,6 @@ spec:
       toPorts:
         - ports:
             - port: "53"
-              protocol: UDP
+              protocol: ANY
+    {{- end }}
 {{- end }}

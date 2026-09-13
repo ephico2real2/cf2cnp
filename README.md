@@ -119,21 +119,28 @@ cf2cnp merge --existing policies/shop.yaml --input flows/ -o new.yaml  # to anot
 A `toFQDNs` rule needs the pod's lookups to pass through Cilium's DNS proxy, which the egress rule to the cluster's DNS
 with `rules.dns` turns on. Where that DNS is differs by platform, and Cilium's DNS guide says so for OpenShift
 ("match the namespace openshift-dns instead of kube-system, remove the match on k8s-app=kube-dns, and change the port to
-5353"). cf2cnp derives the rule from the observed DNS flows when the input has them — the pods the workload asked, on
-the port and protocol it used — and takes a profile otherwise:
+5353"). cf2cnp derives the rule from the observed DNS flows when the input has them — the pods the workload asked
+(CoreDNS by its `k8s-app` label, NodeLocal DNSCache when a Local Redirect Policy sends the lookups there, OpenShift's
+DNS operator by its namespace), on the port and the protocols it used — and takes a profile otherwise. The profiles
+write `ANY`, as Cilium's own examples do: a lookup whose UDP answer is truncated retries over TCP.
 
 ```bash
 cf2cnp generate -i flows.ndjson -o out --dns-profile auto        # default: from the flows, else kubernetes
+cf2cnp generate -i flows.ndjson -o out --dns-profile kubernetes  # kube-system, k8s-app=kube-dns, 53/ANY
 cf2cnp generate -i flows.ndjson -o out --dns-profile openshift   # openshift-dns, 5353/ANY (no k8s-app label)
 cf2cnp generate -i flows.ndjson -o out --dns-resolver dns-system/app=coredns:5353/ANY   # any resolver
 ```
 
-The API takes `?dnsProfile=` and `?dnsResolver=`; the page has a selector. `merge` takes the same flags.
+The API takes `?dnsProfile=` and `?dnsResolver=`; the page has a selector. `merge` takes the same flags. A deployed
+server takes them too (`serve --dns-profile` / `--dns-resolver`, env `CF2CNP_DNS_PROFILE` / `CF2CNP_DNS_RESOLVER`;
+chart values `dns.profile` / `dns.resolver`): the default a request gets when it names none — an OpenShift cluster
+sets `dns.profile: openshift` once, and the Grafana action needs no parameter.
 
 ### External sources: fromCIDR
 
-An ingress flow whose source is outside the cluster (`reserved:world` with an address — an egress-gateway IP, a load
-balancer's client, an office range) becomes `fromCIDR: [<address>/32]`, what the receiver actually saw; without an
+An ingress flow whose source is outside the cluster (`reserved:world` — `reserved:world-ipv4` / `reserved:world-ipv6`
+on a dual-stack cluster — with an address: an egress-gateway IP, a load balancer's client, an office range) becomes
+`fromCIDR: [<address>/32]` (`/128` for IPv6), what the receiver actually saw; without an
 address it stays `fromEntities: [world]`. Cilium refuses a rule that mixes `fromEndpoints` and `fromCIDR`, so cf2cnp
 keeps them in separate rules (and `Sanitize` would say so).
 
@@ -166,6 +173,8 @@ cf2cnp serve --port 8080
 |------------------|-------|--------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | `--port`         | `-p`  | int    | Port number to listen on                                                                                                                                              | `8080`  |
 | `--external-url` |       | string | Base URL clients reach the server at, used for `download_url` (env `CF2CNP_EXTERNAL_URL`). Empty: derived from the request and its `Forwarded` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers | `""`    |
+| `--dns-profile`  |       | string | The DNS resolver profile a request gets when it omits `?dnsProfile=`: `auto`, `kubernetes`, `openshift` (env `CF2CNP_DNS_PROFILE`; a bad value stops the server at start) | `auto`  |
+| `--dns-resolver` |       | string | The DNS resolver a request gets when it omits `?dnsResolver=`, `<namespace>[/<label>=<value>]:<port>[/<protocol>]` (env `CF2CNP_DNS_RESOLVER`) | `""`    |
 
 ---
 

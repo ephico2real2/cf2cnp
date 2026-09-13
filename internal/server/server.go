@@ -37,14 +37,19 @@ type Server struct {
 	externalURL    string
 	allowedOrigins []string // E6: CORS allow-list; empty or ["*"] = any origin (the historical default)
 	authToken      string   // E6: when set, /generate and /download need Authorization: Bearer <token>
+	dnsProfile     string
+	dnsResolver    string
 	cache          map[string]*CachedPolicy
 	mu             sync.RWMutex
 }
 
-// Options are the optional settings of a server (E6): CORS origins and a bearer token.
+// Options are the optional settings of a server: CORS origins and a bearer token (E6); the DNS resolver defaults
+// a request gets when it omits ?dnsProfile= / ?dnsResolver= (0.7.0 — an OpenShift deployment sets them once).
 type Options struct {
 	AllowedOrigins []string
 	AuthToken      string
+	DNSProfile     string
+	DNSResolver    string
 }
 
 // NewServer creates a new HTTP server. externalURL, when set, is the base URL clients reach the
@@ -61,6 +66,8 @@ func NewServerWithOptions(port int, externalURL string, opts Options) *Server {
 		externalURL:    strings.TrimRight(externalURL, "/"),
 		allowedOrigins: opts.AllowedOrigins,
 		authToken:      opts.AuthToken,
+		dnsProfile:     opts.DNSProfile,
+		dnsResolver:    opts.DNSResolver,
 		cache:          make(map[string]*CachedPolicy),
 	}
 	// Start cache cleanup goroutine
@@ -528,7 +535,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
         <label><input id="l7" type="checkbox"> Layer-7 rules <span class="muted">(HTTP method + path, DNS names, from flows that carry them; the port then goes through the proxy)</span></label>
         <label><input id="dnsVisibility" type="checkbox"> DNS visibility <span class="muted">(world traffic without names: add the DNS resolver rule so the next flows carry names)</span></label>
-        <label for="dnsProfile">DNS resolver <span class="muted">(the rule toFQDNs and DNS visibility write: auto = from the observed DNS flows, else kube-system/kube-dns:53; openshift = openshift-dns:5353)</span></label>
+        <label for="dnsProfile">DNS resolver <span class="muted">(the rule toFQDNs and DNS visibility write: auto = from the observed DNS flows, else the server's default — kube-system/kube-dns:53 unless deployed otherwise; openshift = openshift-dns:5353)</span></label>
         <select id="dnsProfile"><option value="auto">auto</option><option value="kubernetes">kubernetes</option><option value="openshift">openshift</option></select>
         <label for="token">Access token <span class="muted">(only when the server requires one; kept in this tab's sessionStorage, never in the page)</span></label>
         <input id="token" type="password" placeholder="Bearer token" spellcheck="false" oninput="try { sessionStorage.setItem('cf2cnp-token', this.value); } catch (e) {}">
@@ -771,14 +778,24 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("l7") == "true" {
 		generator = generator.WithL7() // E2: opt-in layer-7 rules
 	}
+	// 0.7.0: the DNS resolver — the server's defaults (serve --dns-profile / --dns-resolver, checked at start), then
+	// the request's: a profile named by the request replaces the server's resolver too, a resolver named by the
+	// request wins over everything (as --dns-resolver does over --dns-profile)
+	dnsProfile, dnsResolver := s.dnsProfile, s.dnsResolver
 	if p := r.URL.Query().Get("dnsProfile"); p != "" {
-		if _, err := generator.WithDNSProfile(p); err != nil { // 0.7.0: auto | kubernetes | openshift
+		dnsProfile, dnsResolver = p, ""
+	}
+	if spec := r.URL.Query().Get("dnsResolver"); spec != "" {
+		dnsResolver = spec
+	}
+	if dnsProfile != "" {
+		if _, err := generator.WithDNSProfile(dnsProfile); err != nil { // auto | kubernetes | openshift
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
-	if spec := r.URL.Query().Get("dnsResolver"); spec != "" {
-		if _, err := generator.WithDNSResolver(spec); err != nil { // 0.7.0: <namespace>[/<label>=<value>]:<port>[/<proto>]
+	if dnsResolver != "" {
+		if _, err := generator.WithDNSResolver(dnsResolver); err != nil { // <namespace>[/<label>=<value>]:<port>[/<proto>]
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

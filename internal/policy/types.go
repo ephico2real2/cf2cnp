@@ -16,10 +16,12 @@ import (
 
 // CiliumNetworkPolicy is the document cf2cnp writes: the Kubernetes envelope and Cilium's rule as the spec. The
 // metadata field keeps its name (`Metadata`) so `p.Metadata.Name` reads as it always did; there is no status.
+// Specs is Cilium's list form (several rules in one object); cf2cnp never writes it, `validate` and `merge` read it.
 type CiliumNetworkPolicy struct {
 	metav1.TypeMeta `json:",inline"`
 	Metadata        metav1.ObjectMeta `json:"metadata"`
 	Spec            api.Rule          `json:"spec"`
+	Specs           api.Rules         `json:"specs,omitempty"`
 }
 
 type (

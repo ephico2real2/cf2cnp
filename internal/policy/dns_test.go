@@ -12,7 +12,8 @@ func TestDNSResolver_DerivedKubernetes(t *testing.T) {
 	if err != nil || len(ps) != 1 {
 		t.Fatalf("one policy expected: %d %v", len(ps), err)
 	}
-	if got, want := mustYAML(ps[0].Spec.Egress[len(ps[0].Spec.Egress)-1]), mustYAML(dnsRuleFor(dnsProfiles[DNSProfileKubernetes])); got != want {
+	historic := DNSResolver{Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}, Port: "53", Protocol: "UDP"}
+	if got, want := mustYAML(ps[0].Spec.Egress[len(ps[0].Spec.Egress)-1]), mustYAML(dnsRuleFor(historic)); got != want {
 		t.Fatalf("the derived Kubernetes resolver must equal the historic rule:\n%s\n%s", got, want)
 	}
 }
@@ -80,7 +81,7 @@ func TestDNSResolver_Custom(t *testing.T) {
 		t.Fatalf("parse: %+v %v", r, err)
 	}
 	r, err = ParseDNSResolver("kube-system:53")
-	if err != nil || r.Port != "53" || r.Protocol != "UDP" || r.Labels != nil {
+	if err != nil || r.Port != "53" || r.Protocol != "ANY" || r.Labels != nil {
 		t.Fatalf("defaults: %+v %v", r, err)
 	}
 	for _, bad := range []string{"kube-system", ":53", "ns/notalabel:53", ""} {

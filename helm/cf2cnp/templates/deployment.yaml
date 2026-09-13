@@ -43,6 +43,14 @@ spec:
             - --allowed-origins
             - {{ join "," . | quote }}
             {{- end }}
+            {{- if and .Values.dns.profile (ne .Values.dns.profile "auto") }}
+            - --dns-profile
+            - {{ .Values.dns.profile | quote }}
+            {{- end }}
+            {{- with .Values.dns.resolver }}
+            - --dns-resolver
+            - {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
