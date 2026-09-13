@@ -6,12 +6,14 @@ metadata:
   labels:
     {{- include "cf2cnp.labels" . | nindent 4 }}
 spec:
-  description: cf2cnp — reachable from the Gateway and the listed endpoints only; egress to kube-dns only
+  description: cf2cnp — reachable from the Gateway (reserved:ingress), the kubelet's probes (reserved:host) and the listed endpoints only; egress to kube-dns only
   endpointSelector:
     matchLabels:
       {{- include "cf2cnp.selectorLabels" . | nindent 6 }}
   ingress:
-    - fromEntities: [ingress]
+    # measured on Cilium 1.20.1 with Gateway API: a request through the Gateway reaches the pod as reserved:ingress;
+    # the kubelet's liveness/readiness probes reach it as reserved:host — without host, the pod fails its probes
+    - fromEntities: [ingress, host]
       toPorts:
         - ports:
             - port: {{ .Values.containerPort | quote }}

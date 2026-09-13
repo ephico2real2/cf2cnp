@@ -61,8 +61,8 @@ auth:
   token: ""
   existingSecret: ""
 
-# A CiliumNetworkPolicy for the cf2cnp pod (E6): ingress from the Gateway (reserved:ingress) and from the
-# endpoints listed, on the container port; egress to kube-dns only.
+# A CiliumNetworkPolicy for the cf2cnp pod (E6): ingress from the Gateway (reserved:ingress), the kubelet's probes
+# (reserved:host) and the endpoints listed, on the container port; egress to kube-dns only.
 networkPolicy:
   enabled: false
   fromEndpoints:
