@@ -93,21 +93,22 @@ type EventType struct {
 
 // ParsedFlow represents a parsed and processed flow with extracted information
 type ParsedFlow struct {
-	UUID               string            // Flow UUID from Hubble
-	Direction          string            // INGRESS or EGRESS
-	SourceNamespace    string            // Source pod namespace
-	SourceLabels       map[string]string // Filtered source labels
-	SourceEntity       string            // Reserved entity for source (remote-node, host, etc.)
-	IsSourceEntity     bool              // True if source is a reserved entity
-	DestNamespace      string            // Destination pod namespace
-	DestLabels         map[string]string // Filtered destination labels
-	DestFQDNs          []string          // Destination FQDNs for world traffic
-	DestIP             string            // Destination IP for CIDR-based rules
-	DestEntity         string            // Reserved entity (kube-apiserver, host, world, etc.)
-	Protocol           string            // TCP or UDP
-	Port               int               // Destination port
-	IsWorldTraffic     bool              // True if destination is "world"
-	IsDestEntityTraffic bool             // True if destination is a reserved entity
-	IsReply            bool              // True if this is a reply packet
+	UUID                string            // Flow UUID from Hubble
+	Direction           string            // INGRESS or EGRESS
+	SourceNamespace     string            // Source pod namespace
+	SourceLabels        map[string]string // Filtered source labels
+	SourceCluster       string            // flow.source.cluster_name — empty when Hubble did not set it (E1)
+	SourceEntity        string            // Reserved entity for source (remote-node, host, etc.)
+	IsSourceEntity      bool              // True if source is a reserved entity
+	DestNamespace       string            // Destination pod namespace
+	DestLabels          map[string]string // Filtered destination labels
+	DestCluster         string            // flow.destination.cluster_name (E1)
+	DestFQDNs           []string          // Destination FQDNs for world traffic
+	DestIP              string            // Destination IP for CIDR-based rules
+	DestEntity          string            // Reserved entity (kube-apiserver, host, world, etc.)
+	Protocol            string            // TCP or UDP
+	Port                int               // Destination port
+	IsWorldTraffic      bool              // True if destination is "world"
+	IsDestEntityTraffic bool              // True if destination is a reserved entity
+	IsReply             bool              // True if this is a reply packet
 }
-

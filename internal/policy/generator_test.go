@@ -176,3 +176,75 @@ func TestBuildPolicies_NameUnchangedWithoutComponent(t *testing.T) {
 		t.Fatalf("got %s", ps[0].Metadata.Name)
 	}
 }
+
+// E1: a cross-cluster flow (measured on the bank: payments@poc2 → redis-0@poc1:6379, an EGRESS flow reported by
+// the source's node) must name the peer's cluster, because since Cilium 1.19 a selector without
+// io.cilium.k8s.policy.cluster matches the local cluster only — the egress policy for payments (in poc2) would
+// otherwise allow only a redis in poc2 and exclude the poc1 one the flow went to.
+func TestBuildPolicies_CrossClusterPeerNamesItsCluster(t *testing.T) {
+	ps, err := NewGenerator("").BuildPolicies(load(t, "egress-payments-poc2-to-redis-poc1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 1 || len(ps[0].Spec.Egress) != 1 || len(ps[0].Spec.Egress[0].ToEndpoints) != 1 {
+		t.Fatalf("expected one policy with one endpoint egress rule, got %+v", ps)
+	}
+	to := ps[0].Spec.Egress[0].ToEndpoints[0].MatchLabels
+	if to[ClusterLabel] != "poc1" {
+		t.Fatalf("toEndpoints must carry %s=poc1, got %v", ClusterLabel, to)
+	}
+	if _, ok := ps[0].Spec.EndpointSelector.MatchLabels[ClusterLabel]; ok {
+		t.Fatalf("the endpointSelector (the local workload) must not carry the cluster label")
+	}
+	if ps[0].Metadata.Namespace != "bank" || ps[0].Metadata.Name != "payments" {
+		t.Fatalf("the policy is for the source workload: got %s/%s", ps[0].Metadata.Namespace, ps[0].Metadata.Name)
+	}
+}
+
+// Same-cluster flows are untouched: no cluster label (the local-only default is what is wanted), so the
+// output for every single-cluster fixture stays byte-identical
+func TestBuildPolicies_SameClusterHasNoClusterLabel(t *testing.T) {
+	for _, fx := range []string{"ingress-pos-to-shop.json", "egress-pos-to-world.json"} {
+		ps, _ := NewGenerator("").BuildPolicies(load(t, fx))
+		out, _ := EncodePolicies(ps)
+		if strings.Contains(string(out), ClusterLabel) {
+			t.Fatalf("%s: unexpected cluster label:\n%s", fx, out)
+		}
+	}
+}
+
+// Two peers with the same labels in two clusters are two rules
+func TestBuildPolicies_SameLabelsTwoClustersTwoRules(t *testing.T) {
+	mk := func(cluster string) *aggregator.AggregatedFlow {
+		return &aggregator.AggregatedFlow{Direction: "INGRESS", DestNamespace: "bank", DestCluster: "poc1",
+			DestLabels:      map[string]string{"app": "api"},
+			SourceNamespace: "bank", SourceCluster: cluster, SourceLabels: map[string]string{"app": "payments"},
+			Ports: []aggregator.PortInfo{{Port: 8080, Protocol: "TCP"}}}
+	}
+	ps, _ := NewGenerator("").BuildPolicies([]*aggregator.AggregatedFlow{mk("poc1"), mk("poc2")})
+	if len(ps) != 1 || len(ps[0].Spec.Ingress) != 2 {
+		t.Fatalf("expected one policy with two rules (local peer, poc2 peer), got %d policies", len(ps))
+	}
+	if ps[0].Spec.Ingress[0].FromEndpoints[0].MatchLabels[ClusterLabel] != "" || ps[0].Spec.Ingress[1].FromEndpoints[0].MatchLabels[ClusterLabel] != "poc2" {
+		t.Fatalf("rules: %+v", ps[0].Spec.Ingress)
+	}
+}
+
+// Review finding: an empty destination.cluster_name (Hubble without cluster.name) must not lose the cluster the
+// flow's labels carry
+func TestBuildPolicies_ClusterLabelWhenClusterNameEmpty(t *testing.T) {
+	raw := []byte(`{"flow":{"uuid":"x","traffic_direction":"EGRESS","is_reply":false,"l4":{"TCP":{"destination_port":6379}},
+	  "source":{"cluster_name":"poc2","namespace":"bank","labels":["k8s:app=payments","k8s:io.cilium.k8s.policy.cluster=poc2"]},
+	  "destination":{"namespace":"bank","labels":["k8s:app=redis","k8s:io.cilium.k8s.policy.cluster=poc1"]}}}`)
+	f, err := flow.ParseFlowsFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := NewGenerator("").BuildPolicies(aggregator.AggregateFlows(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if to := ps[0].Spec.Egress[0].ToEndpoints[0].MatchLabels; to[ClusterLabel] != "poc1" {
+		t.Fatalf("empty destination.cluster_name must still yield cluster=poc1 from the label, got %v", to)
+	}
+}

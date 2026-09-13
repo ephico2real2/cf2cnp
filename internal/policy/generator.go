@@ -15,6 +15,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ClusterLabel is the label Cilium puts on every endpoint of a ClusterMesh member and matches in
+// fromEndpoints / toEndpoints (cilium Documentation/network/clustermesh/policy.rst). Since 1.19 a selector
+// WITHOUT it matches the local cluster only.
+const ClusterLabel = "io.cilium.k8s.policy.cluster"
+
+// peerCluster is the cluster to name on a peer selector: the peer's, when it is known and differs from the
+// local side's (the local side may be unknown — the peer's label is still what Cilium matches)
+func peerCluster(local, peer string) string {
+	if peer != "" && peer != local {
+		return peer
+	}
+	return ""
+}
+
 // ErrReplyFlow is returned when attempting to generate a policy for a reply flow
 var ErrReplyFlow = errors.New("this is a reply packet - you need to allow the original request, not the reply (Cilium's connection tracking automatically allows replies)")
 
@@ -290,6 +304,10 @@ func (g *Generator) generateEndpointIngressRules(policy *CiliumNetworkPolicy, f 
 	if f.SourceNamespace != "" && f.SourceNamespace != f.DestNamespace {
 		fromLabels[flow.GetNamespaceLabel()] = f.SourceNamespace
 	}
+	// ClusterMesh (E1): name the peer's cluster, or the rule matches the local cluster only
+	if c := peerCluster(f.DestCluster, f.SourceCluster); c != "" {
+		fromLabels[ClusterLabel] = c
+	}
 
 	ingressRule.FromEndpoints = []LabelSelector{
 		{MatchLabels: fromLabels},
@@ -447,6 +465,10 @@ func (g *Generator) generateEndpointEgressRules(policy *CiliumNetworkPolicy, f *
 	// Add namespace label if cross-namespace traffic
 	if f.DestNamespace != "" && f.DestNamespace != f.SourceNamespace {
 		toLabels[flow.GetNamespaceLabel()] = f.DestNamespace
+	}
+	// ClusterMesh (E1): name the peer's cluster, or the rule matches the local cluster only
+	if c := peerCluster(f.SourceCluster, f.DestCluster); c != "" {
+		toLabels[ClusterLabel] = c
 	}
 
 	egressRule.ToEndpoints = []LabelSelector{
