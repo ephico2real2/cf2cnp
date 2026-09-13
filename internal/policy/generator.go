@@ -190,12 +190,42 @@ func MergePolicies(policies []*CiliumNetworkPolicy) []*CiliumNetworkPolicy {
 	result := make([]*CiliumNetworkPolicy, 0, len(order))
 	for _, key := range order {
 		p := byKey[key]
+		p.Spec.Egress = dropShadowedDNSRule(p.Spec.Egress)
 		if n := merged[key]; n > 0 {
 			p.Spec.Description = mergedDescription(p, n+1)
 		}
 		result = append(result, p)
 	}
 	return result
+}
+
+// dropShadowedDNSRule removes the plain kube-dns 53/UDP rule a pod's own lookups produce when the same policy also
+// carries the DNS-visibility rule (E3, or the toFQDNs path): same peer, same port, and `matchPattern: "*"` allows
+// every name, so the L7 rule says everything the plain one said. Cilium accepted both, but the policy read as if
+// the rule were there twice (demo 31; fork issue #1). A narrower DNS rule (names from --l7) is not a superset and
+// leaves the plain rule alone.
+func dropShadowedDNSRule(rules []EgressRule) []EgressRule {
+	visibility := mustYAML(dnsVisibilityRule())
+	shadowed := false
+	for _, r := range rules {
+		if mustYAML(r) == visibility {
+			shadowed = true
+			break
+		}
+	}
+	if !shadowed {
+		return rules
+	}
+	plain := dnsVisibilityRule()
+	plain.ToPorts[0].Rules = nil
+	plainYAML := mustYAML(plain)
+	kept := rules[:0]
+	for _, r := range rules {
+		if mustYAML(r) != plainYAML {
+			kept = append(kept, r)
+		}
+	}
+	return kept
 }
 
 func mergedDescription(p *CiliumNetworkPolicy, flows int) string {

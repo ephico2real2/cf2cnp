@@ -362,3 +362,29 @@ func TestBuildPolicies_DNSVisibilityCompanion(t *testing.T) {
 		t.Fatalf("the comment must say what the rule is for:\n%s", out)
 	}
 }
+
+// Demo 31 finding (fork issue #1): a pod whose flows include its own DNS lookups got kube-dns 53/UDP twice — the plain
+// rule from the lookup and the DNS-visibility rule. With --dns-visibility the plain one is dropped (the L7 rule with
+// matchPattern "*" says everything it said); without the option nothing changes.
+func TestDNSVisibility_OneKubeDNSRule(t *testing.T) {
+	ps, err := NewGenerator("").WithDNSVisibility().BuildPolicies(load(t, "egress-pos-to-kube-dns.json", "egress-pos-to-world.json"))
+	if err != nil || len(ps) != 1 {
+		t.Fatalf("one policy expected: %d %v", len(ps), err)
+	}
+	dns := 0
+	for _, r := range ps[0].Spec.Egress {
+		if len(r.ToEndpoints) == 1 && r.ToEndpoints[0].MatchLabels["k8s-app"] == "kube-dns" {
+			dns++
+			if r.ToPorts[0].Rules == nil || len(r.ToPorts[0].Rules.DNS) != 1 {
+				t.Fatalf("the surviving kube-dns rule must be the DNS-visibility one: %s", mustYAML(r))
+			}
+		}
+	}
+	if dns != 1 {
+		t.Fatalf("kube-dns must appear once, got %d:\n%s", dns, mustYAML(ps[0].Spec.Egress))
+	}
+	plain, _ := NewGenerator("").BuildPolicies(load(t, "egress-pos-to-kube-dns.json", "egress-pos-to-world.json"))
+	if n := len(plain[0].Spec.Egress); n != 2 {
+		t.Fatalf("without the option the plain rule stays beside the CIDR: %d rules", n)
+	}
+}

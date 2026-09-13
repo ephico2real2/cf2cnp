@@ -11,7 +11,6 @@ import (
 	"github.com/hubble-policy-gen/internal/policy"
 	"github.com/hubble-policy-gen/internal/server"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -221,10 +220,6 @@ func runMerge(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	var existing map[string]interface{}
-	if err := yaml.Unmarshal(existingBytes, &existing); err != nil {
-		return fmt.Errorf("existing policy: %w", err)
-	}
 	flows, err := readFlows(inputDir)
 	if err != nil {
 		return err
@@ -236,11 +231,7 @@ func runMerge(cmd *cobra.Command, args []string) error {
 	if len(policies) != 1 {
 		return fmt.Errorf("the flows produce %d policies; merge takes exactly one target — filter the flows to one workload", len(policies))
 	}
-	added, err := policy.MergeInto(existing, policies[0])
-	if err != nil {
-		return err
-	}
-	out, err := yaml.Marshal(existing)
+	out, added, err := policy.MergeDocument(existingBytes, policies[0])
 	if err != nil {
 		return err
 	}

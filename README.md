@@ -43,8 +43,8 @@ go build -o cf2cnp.exe ./cmd/cf2cnp
 ## Installation
 
 > **Fork note (ephico2real2/cf2cnp):** while the changes on this fork are pending upstream, the fork's chart is published as a
-> classic Helm repository at `https://ephico2real2.github.io/cf2cnp` (chart 0.6.0, appVersion 0.6.0) and its image as
-> `ghcr.io/ephico2real2/cf2cnp:0.6.0`. `helm repo add cf2cnp-fork https://ephico2real2.github.io/cf2cnp`.
+> classic Helm repository at `https://ephico2real2.github.io/cf2cnp` (chart 0.6.1, appVersion 0.6.1) and its image as
+> `ghcr.io/ephico2real2/cf2cnp:0.6.1`. `helm repo add cf2cnp-fork https://ephico2real2.github.io/cf2cnp`.
 
 The easiest way to use `CF2CNP` is to deploy it together with the [hubble-observer Helm chart](https://github.com/onzack/hubble-observer). This chart installs both the Hubble observer (to collect network flow data) and `CF2CNP` into your Kubernetes cluster, so you can generate policies directly from observed traffic. You can find installation instructions and configuration options for the Helm chart in the [hubble-observer Helm chart repository](https://github.com/onzack/hubble-observer).
 
@@ -83,6 +83,12 @@ twice changes nothing:
 ```bash
 cf2cnp merge --existing policies/shop.yaml --input flows.json          # in place
 cf2cnp merge --existing policies/shop.yaml --input flows/ -o new.yaml  # to another file
+```
+
+The merged file is the existing file plus the new rules — key order, comments, quoting and indentation are kept, so a pull
+request shows the rules that were added and nothing else (0.6.1; 0.6.0 re-serialised the whole document).
+
+```bash
 ```
 
 The flows must produce exactly one policy, for the same target (namespace, name, endpointSelector) as the
