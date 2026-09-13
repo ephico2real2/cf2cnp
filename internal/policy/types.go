@@ -52,19 +52,26 @@ type FQDNSelector struct {
 
 // PortRule represents port rules
 type PortRule struct {
-	Ports []Port    `yaml:"ports,omitempty"`
-	Rules *DNSRules `yaml:"rules,omitempty"`
+	Ports []Port   `yaml:"ports,omitempty"`
+	Rules *L7Rules `yaml:"rules,omitempty"`
+}
+
+// L7Rules is the `rules:` block of a port rule: HTTP request rules and/or DNS rules (E2)
+type L7Rules struct {
+	HTTP []HTTPRule `yaml:"http,omitempty"`
+	DNS  []DNSRule  `yaml:"dns,omitempty"`
+}
+
+// HTTPRule: method and path are extended POSIX regexes (cilium pkg/policy/api/http.go)
+type HTTPRule struct {
+	Method string `yaml:"method,omitempty"`
+	Path   string `yaml:"path,omitempty"`
 }
 
 // Port represents a single port
 type Port struct {
 	Port     string `yaml:"port"`
 	Protocol string `yaml:"protocol"`
-}
-
-// DNSRules for DNS policy rules
-type DNSRules struct {
-	DNS []DNSRule `yaml:"dns,omitempty"`
 }
 
 // DNSRule represents a DNS rule

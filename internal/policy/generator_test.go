@@ -176,3 +176,60 @@ func TestBuildPolicies_NameUnchangedWithoutComponent(t *testing.T) {
 		t.Fatalf("got %s", ps[0].Metadata.Name)
 	}
 }
+
+func firstRules(ps []*CiliumNetworkPolicy) *L7Rules {
+	for _, p := range ps {
+		for _, r := range p.Spec.Ingress {
+			if len(r.ToPorts) > 0 && r.ToPorts[0].Rules != nil {
+				return r.ToPorts[0].Rules
+			}
+		}
+		for _, r := range p.Spec.Egress {
+			if len(r.ToPorts) > 0 && r.ToPorts[0].Rules != nil {
+				return r.ToPorts[0].Rules
+			}
+		}
+	}
+	return nil
+}
+
+// E2: HTTP REQUEST records become anchored, escaped method+path rules; only with WithL7. The fixture is a
+// measured request through the Gateway (GET https://bankapi.poc.local/api/balance/chk-1001, demo 15).
+func TestBuildPolicies_L7HTTPRules(t *testing.T) {
+	ps, err := NewGenerator("").WithL7().BuildPolicies(load(t, "l7-http-request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := firstRules(ps)
+	if rules == nil || len(rules.HTTP) != 1 || rules.HTTP[0].Method != "GET" || rules.HTTP[0].Path != "^/api/balance/chk-1001$" {
+		t.Fatalf("expected one anchored GET rule for the measured path, got %+v", rules)
+	}
+	plain, _ := NewGenerator("").BuildPolicies(load(t, "l7-http-request.json"))
+	if out, _ := EncodePolicies(plain); strings.Contains(string(out), "http:") {
+		t.Fatalf("without WithL7 the output must be layer-4 only:\n%s", out)
+	}
+}
+
+// E2: a DNS REQUEST yields matchName without the trailing dot; a DNS RESPONSE is the reply side and yields no rule
+func TestBuildPolicies_L7DNSRules(t *testing.T) {
+	ps, _ := NewGenerator("").WithL7().BuildPolicies(load(t, "l7-dns-request.json"))
+	rules := firstRules(ps)
+	if rules == nil || len(rules.DNS) == 0 {
+		t.Fatalf("expected a dns rule from a DNS REQUEST record: %+v", ps)
+	}
+	if n := rules.DNS[0].MatchName; n == "" || strings.HasSuffix(n, ".") {
+		t.Fatalf("matchName must be the query without the trailing dot, got %q", n)
+	}
+	// the reply side (derived from the request record: type RESPONSE, is_reply true) yields no policy at all
+	if _, err := NewGenerator("").WithL7().BuildPolicies(load(t, "l7-dns-response.json")); err == nil {
+		t.Fatalf("a DNS RESPONSE is a reply and must be refused like any reply")
+	}
+}
+
+// E2: regex metacharacters in a path are escaped
+func TestL7Rules_PathIsEscaped(t *testing.T) {
+	r := NewGenerator("").WithL7().l7Rules(&aggregator.AggregatedFlow{HTTPRequests: []aggregator.HTTPRequest{{Method: "GET", Path: "/v1/items.json"}}})
+	if r.HTTP[0].Path != `^/v1/items\.json$` {
+		t.Fatalf("got %q", r.HTTP[0].Path)
+	}
+}
