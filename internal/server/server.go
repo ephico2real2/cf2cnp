@@ -410,6 +410,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
     <div class="controls">
         <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
         <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
+        <label><input id="dnsVisibility" type="checkbox"> DNS visibility <span class="muted">(world traffic without names: add the kube-dns DNS rule so the next flows carry names)</span></label>
     </div>
     <div class="buttons">
         <button onclick="generatePolicy()">Generate Policy</button>
@@ -477,7 +478,8 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             const input = document.getElementById('flowInput').value;
             const result = document.getElementById('result'); const apply = document.getElementById('apply');
             const name = document.getElementById('policyName').value.trim();
-            const url = '/generate' + (name ? '?name=' + encodeURIComponent(name) : '');
+            const params = []; if (name) params.push('name=' + encodeURIComponent(name)); if (document.getElementById('dnsVisibility').checked) params.push('dnsVisibility=true');
+            const url = '/generate' + (params.length ? '?' + params.join('&') : '');
             try {
                 const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: input });
                 if (!response.ok) { result.textContent = 'Error: ' + await response.text(); apply.textContent = ''; setButtons(false); return; }
@@ -598,6 +600,9 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	generator := policy.NewGenerator("")
 	if name := strings.TrimSpace(r.URL.Query().Get("name")); name != "" {
 		generator = generator.WithName(name)
+	}
+	if r.URL.Query().Get("dnsVisibility") == "true" {
+		generator = generator.WithDNSVisibility() // E3: opt-in DNS visibility companion rule
 	}
 	policies, yamlBytes, err := generator.GeneratePoliciesWithYAML(aggregatedFlows)
 	if err != nil {

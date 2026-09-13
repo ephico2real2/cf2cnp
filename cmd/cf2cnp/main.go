@@ -16,6 +16,7 @@ var (
 	outputDir     string
 	port          int
 	externalURL   string
+	dnsVisibility bool
 	yoloNamespace string
 )
 
@@ -46,6 +47,7 @@ or use the 'serve' command to run as an HTTP server.`,
 	}
 	generateCmd.Flags().StringVarP(&inputDir, "input", "i", "", "Input directory containing Hubble flow JSON files (required)")
 	generateCmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory for generated CiliumNetworkPolicy YAML files (required)")
+	generateCmd.Flags().BoolVar(&dnsVisibility, "dns-visibility", false, "For world traffic without DNS names, add the kube-dns L7 DNS rule so the next flows carry names (toFQDNs on the next run)")
 	generateCmd.MarkFlagRequired("input")
 	generateCmd.MarkFlagRequired("output")
 
@@ -143,6 +145,9 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	// Generate policies
 	generator := policy.NewGenerator(outputDir)
+	if dnsVisibility {
+		generator = generator.WithDNSVisibility()
+	}
 	if err := generator.GeneratePolicies(aggregatedFlows); err != nil {
 		return fmt.Errorf("failed to generate policies: %w", err)
 	}
