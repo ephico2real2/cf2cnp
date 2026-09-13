@@ -2,7 +2,8 @@ package policy
 
 import (
 	"errors"
-	"runtime/debug"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -139,19 +140,22 @@ func TestValidate_ObjectNameAndSpecs(t *testing.T) {
 
 // Review ENH-003 (Cursor, finding 6): hosted Renovate does not run postUpgradeTasks, so a Cilium bump lands without
 // `go generate ./internal/crd`. CI's cmp catches the file; this catches the version from `go test` alone: the
-// embedded CRD's version is the module's version in this very binary.
+// embedded CRD's version is the version go.mod requires. (Cursor's snippet read debug.ReadBuildInfo().Deps; on the
+// GitHub runner the test binary reported no Deps at all — measured, CI run 34774484089 — so the source of truth is
+// the go.mod line.)
 func TestEmbeddedCRDVersionMatchesModule(t *testing.T) {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		t.Fatal("no build info")
+	b, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	want := ""
-	for _, d := range bi.Deps {
-		if d.Path == "github.com/cilium/cilium" {
-			want = d.Version
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "github.com/cilium/cilium" {
+			want = f[1]
 		}
 	}
 	if want == "" || crd.Version() != want {
-		t.Fatalf("embedded CRD %q, module %q — run go generate ./internal/crd", crd.Version(), want)
+		t.Fatalf("embedded CRD %q, go.mod requires %q — run go generate ./internal/crd", crd.Version(), want)
 	}
 }
