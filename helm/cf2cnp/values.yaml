@@ -49,6 +49,26 @@ containerPort: 8080
 # the proxy strips those headers or the public URL differs from the Host the pod sees.
 externalURL: ""
 
+# CORS (E6): origins allowed to call /generate from a browser (Grafana's origin for the dashboard action).
+# Empty = any origin, the historical default.
+cors:
+  allowedOrigins: []
+  # - https://grafana.example.com
+
+# Authentication (E6): a bearer token required on /generate and /download (never on /health or the page).
+# Prefer existingSecret (a Secret with the key `token`); `token` is for labs.
+auth:
+  token: ""
+  existingSecret: ""
+
+# A CiliumNetworkPolicy for the cf2cnp pod (E6): ingress from the Gateway (reserved:ingress) and from the
+# endpoints listed, on the container port; egress to kube-dns only.
+networkPolicy:
+  enabled: false
+  fromEndpoints:
+    - matchLabels:
+        app.kubernetes.io/name: grafana
+
 # Extra arguments appended to `cf2cnp serve --port <containerPort>` (e.g. a flag this chart has no value for)
 extraArgs: []
 

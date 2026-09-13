@@ -10,20 +10,20 @@ import (
 
 // AggregatedFlow represents flows grouped by source/destination
 type AggregatedFlow struct {
-	Direction          string            // INGRESS or EGRESS
-	SourceNamespace    string            // Source pod namespace
-	SourceLabels       map[string]string // Filtered source labels
-	SourceEntity       string            // Reserved entity for source (remote-node, host, etc.)
-	IsSourceEntity     bool              // True if source is a reserved entity
-	DestNamespace      string            // Destination pod namespace
-	DestLabels         map[string]string // Filtered destination labels
-	DestFQDNs          []string          // Destination FQDNs for world traffic
-	DestIPs            []string          // Destination IPs for CIDR-based rules
-	DestEntity         string            // Reserved entity (kube-apiserver, host, world, etc.)
-	Ports              []PortInfo        // Aggregated ports
-	IsWorldTraffic     bool              // True if destination is "world"
-	IsDestEntityTraffic bool             // True if destination is a reserved entity
-	IsReply            bool              // True if this is a reply packet
+	Direction           string            // INGRESS or EGRESS
+	SourceNamespace     string            // Source pod namespace
+	SourceLabels        map[string]string // Filtered source labels
+	SourceEntity        string            // Reserved entity for source (remote-node, host, etc.)
+	IsSourceEntity      bool              // True if source is a reserved entity
+	DestNamespace       string            // Destination pod namespace
+	DestLabels          map[string]string // Filtered destination labels
+	DestFQDNs           []string          // Destination FQDNs for world traffic
+	DestIPs             []string          // Destination IPs for CIDR-based rules
+	DestEntity          string            // Reserved entity (kube-apiserver, host, world, etc.)
+	Ports               []PortInfo        // Aggregated ports
+	IsWorldTraffic      bool              // True if destination is "world"
+	IsDestEntityTraffic bool              // True if destination is a reserved entity
+	IsReply             bool              // True if this is a reply packet
 }
 
 // PortInfo represents a port and protocol combination
@@ -63,20 +63,20 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 				destIPs = []string{f.DestIP}
 			}
 			aggregated := &AggregatedFlow{
-				Direction:          f.Direction,
-				SourceNamespace:    f.SourceNamespace,
-				SourceLabels:       copyLabels(f.SourceLabels),
-				SourceEntity:       f.SourceEntity,
-				IsSourceEntity:     f.IsSourceEntity,
-				DestNamespace:      f.DestNamespace,
-				DestLabels:         copyLabels(f.DestLabels),
-				DestFQDNs:          append([]string{}, f.DestFQDNs...),
-				DestIPs:            destIPs,
-				DestEntity:         f.DestEntity,
-				Ports:              []PortInfo{{Port: f.Port, Protocol: f.Protocol}},
-				IsWorldTraffic:     f.IsWorldTraffic,
+				Direction:           f.Direction,
+				SourceNamespace:     f.SourceNamespace,
+				SourceLabels:        copyLabels(f.SourceLabels),
+				SourceEntity:        f.SourceEntity,
+				IsSourceEntity:      f.IsSourceEntity,
+				DestNamespace:       f.DestNamespace,
+				DestLabels:          copyLabels(f.DestLabels),
+				DestFQDNs:           append([]string{}, f.DestFQDNs...),
+				DestIPs:             destIPs,
+				DestEntity:          f.DestEntity,
+				Ports:               []PortInfo{{Port: f.Port, Protocol: f.Protocol}},
+				IsWorldTraffic:      f.IsWorldTraffic,
 				IsDestEntityTraffic: f.IsDestEntityTraffic,
-				IsReply:            f.IsReply,
+				IsReply:             f.IsReply,
 			}
 			aggregationMap[key] = aggregated
 		}
@@ -112,20 +112,20 @@ func generateAggregationKey(f *flow.ParsedFlow) string {
 	parts = append(parts, f.Direction)
 	parts = append(parts, f.SourceNamespace)
 	parts = append(parts, labelsToString(f.SourceLabels))
-	
+
 	// Include source entity in key for entity-based traffic
 	if f.IsSourceEntity {
 		parts = append(parts, f.SourceEntity)
 	}
-	
+
 	parts = append(parts, f.DestNamespace)
 	parts = append(parts, labelsToString(f.DestLabels))
-	
+
 	// Include destination entity in key for entity-based traffic
 	if f.IsDestEntityTraffic {
 		parts = append(parts, f.DestEntity)
 	}
-	
+
 	if f.IsWorldTraffic {
 		// For world traffic, include FQDNs in the key
 		fqdns := append([]string{}, f.DestFQDNs...)
@@ -187,18 +187,17 @@ func containsString(slice []string, s string) bool {
 // parsedFlowFromAggregated creates a minimal ParsedFlow for key generation
 func parsedFlowFromAggregated(agg *AggregatedFlow) *flow.ParsedFlow {
 	return &flow.ParsedFlow{
-		Direction:          agg.Direction,
-		SourceNamespace:    agg.SourceNamespace,
-		SourceLabels:       agg.SourceLabels,
-		SourceEntity:       agg.SourceEntity,
-		IsSourceEntity:     agg.IsSourceEntity,
-		DestNamespace:      agg.DestNamespace,
-		DestLabels:         agg.DestLabels,
-		DestFQDNs:          agg.DestFQDNs,
-		DestEntity:         agg.DestEntity,
-		IsWorldTraffic:     agg.IsWorldTraffic,
+		Direction:           agg.Direction,
+		SourceNamespace:     agg.SourceNamespace,
+		SourceLabels:        agg.SourceLabels,
+		SourceEntity:        agg.SourceEntity,
+		IsSourceEntity:      agg.IsSourceEntity,
+		DestNamespace:       agg.DestNamespace,
+		DestLabels:          agg.DestLabels,
+		DestFQDNs:           agg.DestFQDNs,
+		DestEntity:          agg.DestEntity,
+		IsWorldTraffic:      agg.IsWorldTraffic,
 		IsDestEntityTraffic: agg.IsDestEntityTraffic,
-		IsReply:            agg.IsReply,
+		IsReply:             agg.IsReply,
 	}
 }
-

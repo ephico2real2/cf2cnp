@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -31,20 +32,35 @@ type CachedPolicy struct {
 
 // Server represents the HTTP server for policy generation
 type Server struct {
-	port        int
-	externalURL string
-	cache       map[string]*CachedPolicy
-	mu          sync.RWMutex
+	port           int
+	externalURL    string
+	allowedOrigins []string // E6: CORS allow-list; empty or ["*"] = any origin (the historical default)
+	authToken      string   // E6: when set, /generate and /download need Authorization: Bearer <token>
+	cache          map[string]*CachedPolicy
+	mu             sync.RWMutex
+}
+
+// Options are the optional settings of a server (E6): CORS origins and a bearer token.
+type Options struct {
+	AllowedOrigins []string
+	AuthToken      string
 }
 
 // NewServer creates a new HTTP server. externalURL, when set, is the base URL clients reach the
 // server at (scheme://host[:port][/prefix]); it wins over anything the request says when building
 // download_url. Leave it empty to derive the base from the request (see baseURL).
 func NewServer(port int, externalURL string) *Server {
+	return NewServerWithOptions(port, externalURL, Options{})
+}
+
+// NewServerWithOptions is NewServer with the E6 options
+func NewServerWithOptions(port int, externalURL string, opts Options) *Server {
 	s := &Server{
-		port:        port,
-		externalURL: strings.TrimRight(externalURL, "/"),
-		cache:       make(map[string]*CachedPolicy),
+		port:           port,
+		externalURL:    strings.TrimRight(externalURL, "/"),
+		allowedOrigins: opts.AllowedOrigins,
+		authToken:      opts.AuthToken,
+		cache:          make(map[string]*CachedPolicy),
 	}
 	// Start cache cleanup goroutine
 	go s.cleanupCache()
@@ -76,8 +92,8 @@ func generateID() string {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	http.HandleFunc("/generate", s.corsMiddleware(s.handleGenerate))
-	http.HandleFunc("/download/", s.corsMiddleware(s.handleDownload))
+	http.HandleFunc("/generate", s.corsMiddleware(s.requireToken(s.handleGenerate)))
+	http.HandleFunc("/download/", s.corsMiddleware(s.requireToken(s.handleDownload)))
 	http.HandleFunc("/health", s.corsMiddleware(s.handleHealth))
 	http.HandleFunc("/", s.handleIndex)
 
@@ -198,22 +214,55 @@ func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yaml
 	log.Printf("Generated policy (cached): %s, download: %s", filename, downloadURL)
 }
 
-// corsMiddleware adds CORS headers and handles preflight requests
+// corsMiddleware answers preflight and echoes the request's Origin when it is allowed — any origin when
+// the list is empty or "*" (the historical default), else only a listed one (E6). Grafana's action is a
+// cross-origin fetch from the Grafana origin, so that origin is the one to list.
 func (s *Server) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := s.allowedOrigin(r.Header.Get("Origin")); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			if origin != "*" {
+				w.Header().Add("Vary", "Origin")
+			}
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, X-Grafana-Action, X-Grafana-Device-Id, X-Grafana-Org-Id")
 		w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
 		w.Header().Set("Access-Control-Max-Age", "86400")
-
-		// Handle preflight OPTIONS request
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		next(w, r)
+	}
+}
 
+// allowedOrigin returns the value for Access-Control-Allow-Origin: "*" when any origin is allowed, the
+// request's origin when it is listed, "" when it is not
+func (s *Server) allowedOrigin(origin string) string {
+	if len(s.allowedOrigins) == 0 || (len(s.allowedOrigins) == 1 && s.allowedOrigins[0] == "*") {
+		return "*"
+	}
+	for _, o := range s.allowedOrigins {
+		if strings.EqualFold(strings.TrimRight(o, "/"), strings.TrimRight(origin, "/")) && origin != "" {
+			return origin
+		}
+	}
+	return ""
+}
+
+// requireToken checks Authorization: Bearer <token> when a token is configured (E6). Constant-time compare;
+// preflight (OPTIONS) is never challenged, or the browser cannot even ask.
+func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.authToken != "" && r.Method != http.MethodOptions {
+			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if subtle.ConstantTimeCompare([]byte(got), []byte(s.authToken)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Bearer realm="cf2cnp"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
 		next(w, r)
 	}
 }
@@ -410,6 +459,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
     <div class="controls">
         <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
         <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
+        <label for="token">Access token <span class="muted">(only when the server requires one; kept in this tab's sessionStorage, never in the page)</span></label>
+        <input id="token" type="password" placeholder="Bearer token" spellcheck="false" oninput="try { sessionStorage.setItem('cf2cnp-token', this.value); } catch (e) {}">
     </div>
     <div class="buttons">
         <button onclick="generatePolicy()">Generate Policy</button>
@@ -473,13 +524,17 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             } catch (e) { box.textContent = 'Not valid JSON yet: ' + e.message; }
         }
         let lastYAML = '', lastFilename = 'ciliumnetworkpolicy.yaml';
+        try { const t = sessionStorage.getItem('cf2cnp-token'); if (t) document.getElementById('token').value = t; } catch (e) {}
         async function generatePolicy() {
             const input = document.getElementById('flowInput').value;
             const result = document.getElementById('result'); const apply = document.getElementById('apply');
             const name = document.getElementById('policyName').value.trim();
             const url = '/generate' + (name ? '?name=' + encodeURIComponent(name) : '');
             try {
-                const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: input });
+                const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+                const token = document.getElementById('token').value.trim(); if (token) headers['Authorization'] = 'Bearer ' + token;
+                const response = await fetch(url, { method: 'POST', headers: headers, body: input });
+                if (response.status === 401) { result.textContent = 'Error: this server requires an access token (401)'; apply.textContent = ''; setButtons(false); return; }
                 if (!response.ok) { result.textContent = 'Error: ' + await response.text(); apply.textContent = ''; setButtons(false); return; }
                 const data = await response.json();
                 lastYAML = data.yaml; lastFilename = data.filename; result.textContent = data.yaml;
