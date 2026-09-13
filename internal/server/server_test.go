@@ -76,6 +76,52 @@ func TestDownloadURL_Scheme(t *testing.T) {
 	}
 }
 
+// Review finding: Forwarded (RFC 7239) must beat X-Forwarded-*, and a host header is a host, not a path
+func TestDownloadURL_PrecedenceAndHostSanity(t *testing.T) {
+	flow := fixture(t, "ingress-pos-to-shop.json")
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{"Forwarded wins over X-Forwarded-*", map[string]string{"Forwarded": `for=10.0.0.1;proto=https;host="cf2cnp.poc.local"`, "X-Forwarded-Proto": "http", "X-Forwarded-Host": "evil.example"}, "https://cf2cnp.poc.local/download/"},
+		{"X-Forwarded-Host with a path is ignored", map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "evil.example/steal"}, "https://cf2cnp.example.test/download/"},
+		{"trailing slash is not a host", map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "cf2cnp.poc.local/"}, "https://cf2cnp.example.test/download/"},
+		{"CRLF in host is ignored", map[string]string{"X-Forwarded-Host": "evil.example\r\nX-Injected: 1"}, "http://cf2cnp.example.test/download/"},
+		{"blank X-Forwarded-Host keeps r.Host", map[string]string{"X-Forwarded-Host": "   "}, "http://cf2cnp.example.test/download/"},
+		{"Forwarded for= only", map[string]string{"Forwarded": "for=10.0.0.1"}, "http://cf2cnp.example.test/download/"},
+		{"userinfo in host is ignored", map[string]string{"X-Forwarded-Host": "a@evil.example"}, "http://cf2cnp.example.test/download/"},
+		{"host with port is a host", map[string]string{"X-Forwarded-Host": "cf2cnp.poc.local:8443", "X-Forwarded-Proto": "https"}, "https://cf2cnp.poc.local:8443/download/"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := map[string]string{"Accept": "application/json"}
+			for k, v := range c.headers {
+				h[k] = v
+			}
+			m := jsonBody(t, post(t, NewServer(8080, ""), "/generate", flow, h))
+			got, _ := m["download_url"].(string)
+			if !strings.HasPrefix(got, c.want) || strings.Contains(got, "//download") {
+				t.Fatalf("download_url = %q, want prefix %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestGenerate_BodyLimit(t *testing.T) {
+	s := NewServer(8080, "")
+	rec := post(t, s, "/generate", strings.Repeat("x", maxBodyBytes+1), nil)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize body: %d %s", rec.Code, rec.Body.String())
+	}
+	// a large but legitimate body: 500 flows
+	body := strings.Repeat(fixture(t, "ingress-pos-to-shop.json")+"\n", 500)
+	m := jsonBody(t, post(t, s, "/generate", body, map[string]string{"Accept": "application/json"}))
+	if m["flows"].(float64) != 500 || m["policies"].(float64) != 1 {
+		t.Fatalf("500 identical flows must be one policy: flows=%v policies=%v", m["flows"], m["policies"])
+	}
+}
+
 func TestGenerate_GrafanaActionKeepsFlowUUIDAndServesDownload(t *testing.T) {
 	s := NewServer(8080, "")
 	flow := fixture(t, "ingress-pos-to-shop.json")

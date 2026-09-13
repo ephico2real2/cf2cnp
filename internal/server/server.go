@@ -19,6 +19,9 @@ import (
 	"github.com/hubble-policy-gen/internal/policy"
 )
 
+// maxBodyBytes caps a /generate body (8 MiB: several thousand flows)
+const maxBodyBytes = 8 << 20
+
 // CachedPolicy stores a generated policy for download
 type CachedPolicy struct {
 	Content   []byte
@@ -79,19 +82,22 @@ func (s *Server) Start() error {
 	http.HandleFunc("/", s.handleIndex)
 
 	addr := fmt.Sprintf(":%d", s.port)
+	srv := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second}
 	log.Printf("Starting server on %s", addr)
 	log.Printf("POST /generate - Send Hubble flow JSON to generate CiliumNetworkPolicy YAML")
 	log.Printf("GET /download/{id} - Download generated policy")
 	log.Printf("GET /health - Health check endpoint")
 
-	return http.ListenAndServe(addr, nil)
+	return srv.ListenAndServe()
 }
 
 // baseURL is the base clients can reach this server at, for the download_url in JSON answers.
-// Precedence: the configured external URL; then the proxy headers a TLS-terminating ingress or
-// gateway sets — RFC 7239 `Forwarded` (proto=, host=) and the de-facto X-Forwarded-Proto /
-// X-Forwarded-Host; then the request itself (TLS on the listener, the Host header). Without the
-// header check a server behind an https-only route answered http:// URLs to a port that was closed.
+// Precedence: the configured external URL; then RFC 7239 `Forwarded` (proto=, host= of the first,
+// client-most element); then the de-facto X-Forwarded-Proto / X-Forwarded-Host (first value); then the
+// request itself (TLS on the listener, the Host header). Only http/https count as a proto and only a
+// bare host[:port] counts as a host — a header carrying a path, a slash, whitespace or CRLF is ignored,
+// so a client cannot be handed a URL that points elsewhere. Without the header check a server behind an
+// https-only route answered http:// URLs to a port that was closed.
 func (s *Server) baseURL(r *http.Request) string {
 	if s.externalURL != "" {
 		return s.externalURL
@@ -100,8 +106,14 @@ func (s *Server) baseURL(r *http.Request) string {
 	if r.TLS != nil {
 		scheme = "https"
 	}
+	// lowest precedence of the headers first, so later assignments win
+	if v := validProto(firstValue(r.Header.Get("X-Forwarded-Proto"))); v != "" {
+		scheme = v
+	}
+	if v := validHost(firstValue(r.Header.Get("X-Forwarded-Host"))); v != "" {
+		host = v
+	}
 	if fwd := r.Header.Get("Forwarded"); fwd != "" {
-		// first (closest to the client) element; pairs are `k=v` separated by ';', values may be quoted
 		for _, pair := range strings.Split(strings.Split(fwd, ",")[0], ";") {
 			kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
 			if len(kv) != 2 {
@@ -110,26 +122,46 @@ func (s *Server) baseURL(r *http.Request) string {
 			v := strings.Trim(strings.TrimSpace(kv[1]), "\"")
 			switch strings.ToLower(strings.TrimSpace(kv[0])) {
 			case "proto":
-				if v == "http" || v == "https" {
-					scheme = v
+				if p := validProto(v); p != "" {
+					scheme = p
 				}
 			case "host":
-				if v != "" {
-					host = v
+				if h := validHost(v); h != "" {
+					host = h
 				}
 			}
 		}
 	}
-	if v := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])); v == "http" || v == "https" {
-		scheme = v
-	}
-	if v := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0]); v != "" {
-		host = v
-	}
 	if scheme == "" {
 		scheme = "http"
 	}
+	if host == "" {
+		host = r.Host
+	}
 	return scheme + "://" + host
+}
+
+// firstValue is the first element of a comma-separated header value, trimmed
+func firstValue(v string) string {
+	return strings.TrimSpace(strings.Split(v, ",")[0])
+}
+
+// validProto returns http or https, else ""
+func validProto(v string) string {
+	switch strings.ToLower(v) {
+	case "http", "https":
+		return strings.ToLower(v)
+	}
+	return ""
+}
+
+// validHost returns v when it is a bare host[:port] (no path, userinfo, whitespace or control characters), else ""
+func validHost(v string) string {
+	v = strings.Trim(strings.TrimSpace(v), "\"")
+	if v == "" || strings.ContainsAny(v, "/\\?#@ \t\r\n") {
+		return ""
+	}
+	return v
 }
 
 // wantsJSON reports whether the client asked for the JSON answer (Grafana's action sets
@@ -518,9 +550,16 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read request body
+	// Read request body — capped: a public /generate must not let one POST fill memory. maxBodyBytes holds
+	// several thousand flows (a flow is ~1.5 KB); http.MaxBytesReader makes an oversize body a 413.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, fmt.Sprintf("Request body larger than %d bytes", maxBodyBytes), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Failed to read request body: %v", err), http.StatusBadRequest)
 		return
 	}

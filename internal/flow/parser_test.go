@@ -79,3 +79,19 @@ func TestParseFlowsFromDirectory_ManyPerFile(t *testing.T) {
 		t.Fatalf("expected 3 flows from 2 files, got %d", len(flows))
 	}
 }
+
+// Review finding: json.Decoder turns `{}`, `null` and objects without "flow" into a zero flow without error
+func TestParseFlowsFromBytes_RejectsNonFlows(t *testing.T) {
+	good := string(fixture(t, "ingress-pos-to-shop.json"))
+	for _, in := range []string{`[{}]`, `[{"foo":1}]`, `{}`, good + "\n{}", good + "\nnull", `{"flow":{}}`} {
+		if _, err := ParseFlowsFromBytes([]byte(in)); err == nil {
+			t.Fatalf("must reject %q", in)
+		} else if !strings.Contains(err.Error(), "not a Hubble flow") && !strings.Contains(err.Error(), "parse") {
+			t.Fatalf("error must say why: %v", err)
+		}
+	}
+	two := good + string(fixture(t, "ingress-stranger-to-shop.json")) // two objects, no separator
+	if fs, err := ParseFlowsFromBytes([]byte(two)); err != nil || len(fs) != 2 {
+		t.Fatalf("two concatenated flows: %d %v", len(fs), err)
+	}
+}

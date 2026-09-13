@@ -123,6 +123,11 @@ func ParseFlowsFromDirectory(dirPath string) ([]*ParsedFlow, error) {
 
 // parseFlow converts a Flow struct to a ParsedFlow with extracted information
 func parseFlow(flow *Flow) (*ParsedFlow, error) {
+	// A zero Flow decodes from `{}`, `null` or an object without a "flow" key without error; it would
+	// become a policy with empty selectors. Refuse anything that names neither an endpoint nor a direction.
+	if flow == nil || (flow.UUID == "" && flow.TrafficDirection == "" && len(flow.Source.Labels) == 0 && len(flow.Destination.Labels) == 0) {
+		return nil, errors.New("not a Hubble flow (no flow.source/destination labels, no traffic_direction, no uuid)")
+	}
 	parsed := &ParsedFlow{
 		UUID:         flow.UUID,
 		SourceLabels: make(map[string]string),
@@ -145,7 +150,7 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 	// Check if destination is a reserved entity (kube-apiserver, host, world, etc.)
 	parsed.DestEntity = getReservedEntity(flow.Destination.Labels)
 	parsed.IsDestEntityTraffic = parsed.DestEntity != ""
-	
+
 	// Check if destination is "world" (external traffic)
 	parsed.IsWorldTraffic = isWorldTraffic(flow.Destination.Labels)
 	if parsed.IsWorldTraffic {
@@ -186,7 +191,7 @@ func extractLabels(labels []string) map[string]string {
 	for _, label := range labels {
 		// Remove "k8s:" prefix if present
 		labelStr := strings.TrimPrefix(label, "k8s:")
-		
+
 		// Split by "=" to get key and value
 		parts := strings.SplitN(labelStr, "=", 2)
 		if len(parts) != 2 {
@@ -240,7 +245,7 @@ var reservedEntities = map[string]string{
 // getReservedEntity checks if the endpoint is a reserved entity and returns the entity name
 func getReservedEntity(labels []string) string {
 	var foundEntity string
-	
+
 	for _, label := range labels {
 		if entity, ok := reservedEntities[label]; ok {
 			// Prefer kube-apiserver over other entities if present
@@ -295,4 +300,3 @@ func inferTrafficDirection(parsed *ParsedFlow) string {
 	// Fallback
 	return "EGRESS"
 }
-
