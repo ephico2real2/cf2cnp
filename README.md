@@ -64,6 +64,20 @@ cf2cnp generate --input <input-directory> --output <output-directory>
 cf2cnp generate --input ./inputfolder --output ./generated-policies
 ```
 
+### 1b. Merge into an existing policy (CLI)
+
+Evolve a policy that is already applied instead of regenerating it — every field of the existing document
+survives (`ingressDeny`, annotations, …), only rules that are not there yet are added, and running it
+twice changes nothing:
+
+```bash
+cf2cnp merge --existing policies/shop.yaml --input flows.json          # in place
+cf2cnp merge --existing policies/shop.yaml --input flows/ -o new.yaml  # to another file
+```
+
+The flows must produce exactly one policy, for the same target (namespace, name, endpointSelector) as the
+existing file; otherwise the command refuses.
+
 ### 2. HTTP Server Mode
 
 Start an HTTP server to generate policies via API:

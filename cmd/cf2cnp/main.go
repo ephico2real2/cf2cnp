@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/hubble-policy-gen/internal/aggregator"
 	"github.com/hubble-policy-gen/internal/flow"
 	"github.com/hubble-policy-gen/internal/policy"
 	"github.com/hubble-policy-gen/internal/server"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -18,6 +20,8 @@ var (
 	externalURL   string
 	l7            bool
 	dnsVisibility bool
+	existingFile  string
+	outputFile    string
 	yoloNamespace string
 )
 
@@ -97,7 +101,24 @@ Example:
 
 	yoloCmd.AddCommand(yoloNsCmd)
 
+	// Merge command (E5): evolve an existing policy instead of regenerating it
+	mergeCmd := &cobra.Command{
+		Use:   "merge",
+		Short: "Merge rules generated from flows into an existing CiliumNetworkPolicy file",
+		Long: `Read flows (a file or a directory), generate the policy for their workload, and add its rules to an
+existing CiliumNetworkPolicy YAML — keeping every field of the existing document, adding only rules that
+are not already there. Running it twice changes nothing. The existing policy must be the same target
+(namespace, name, endpointSelector); otherwise the command refuses.`,
+		RunE: runMerge,
+	}
+	mergeCmd.Flags().StringVar(&existingFile, "existing", "", "Existing CiliumNetworkPolicy YAML (required)")
+	mergeCmd.Flags().StringVarP(&inputDir, "input", "i", "", "Flow file (one flow, an array, or one per line) or a directory of such files (required)")
+	mergeCmd.Flags().StringVarP(&outputFile, "output", "o", "", "Where to write the merged policy (default: --existing, in place)")
+	mergeCmd.MarkFlagRequired("existing")
+	mergeCmd.MarkFlagRequired("input")
+
 	rootCmd.AddCommand(generateCmd)
+	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(yoloCmd)
 
@@ -164,4 +185,62 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 func runServe(cmd *cobra.Command, args []string) error {
 	srv := server.NewServer(port, externalURL)
 	return srv.Start()
+}
+
+// readFlows reads a flows file or every .json file of a directory
+func readFlows(path string) ([]*flow.ParsedFlow, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return flow.ParseFlowsFromDirectory(path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return flow.ParseFlowsFromBytes(data)
+}
+
+func runMerge(cmd *cobra.Command, args []string) error {
+	existingBytes, err := os.ReadFile(existingFile)
+	if err != nil {
+		return err
+	}
+	var existing map[string]interface{}
+	if err := yaml.Unmarshal(existingBytes, &existing); err != nil {
+		return fmt.Errorf("existing policy: %w", err)
+	}
+	flows, err := readFlows(inputDir)
+	if err != nil {
+		return err
+	}
+	policies, err := policy.NewGenerator("").BuildPolicies(aggregator.AggregateFlows(flows))
+	if err != nil {
+		return err
+	}
+	if len(policies) != 1 {
+		return fmt.Errorf("the flows produce %d policies; merge takes exactly one target — filter the flows to one workload", len(policies))
+	}
+	added, err := policy.MergeInto(existing, policies[0])
+	if err != nil {
+		return err
+	}
+	out, err := yaml.Marshal(existing)
+	if err != nil {
+		return err
+	}
+	target := outputFile
+	if target == "" {
+		target = existingFile
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(target, out, 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("%d rule(s) added → %s\n", added, target)
+	return nil
 }
