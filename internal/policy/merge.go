@@ -22,7 +22,7 @@ func MergeInto(existing map[string]interface{}, generated *CiliumNetworkPolicy) 
 		return 0, fmt.Errorf("target mismatch: existing %v/%v, generated %s/%s",
 			meta["namespace"], meta["name"], generated.Metadata.Namespace, generated.Metadata.Name)
 	}
-	if mustYAML(spec["endpointSelector"]) != mustYAML(toGeneric(generated.Spec.EndpointSelector)) {
+	if canonicalYAML(spec["endpointSelector"]) != canonicalYAML(toGeneric(generated.Spec.EndpointSelector)) {
 		return 0, errors.New("target mismatch: the endpointSelector differs")
 	}
 	for _, r := range generated.Spec.Ingress {
@@ -49,12 +49,44 @@ func toGeneric(v interface{}) interface{} {
 // appendUnique adds item to spec[key] (a list) unless an equal item is already there
 func appendUnique(spec map[string]interface{}, key string, item interface{}) bool {
 	list, _ := spec[key].([]interface{})
-	want := mustYAML(item)
+	want := canonicalYAML(item)
 	for _, have := range list {
-		if mustYAML(have) == want {
+		if canonicalYAML(have) == want {
 			return false
 		}
 	}
 	spec[key] = append(list, item)
 	return true
+}
+
+// canonicalYAML renders a generic value for comparison with every scalar as a string: a hand-written
+// `port: 80` and the generated `port: "80"` are one rule to Kubernetes and must be one rule here (review
+// finding — without this the merge appended a duplicate)
+func canonicalYAML(v interface{}) string {
+	b, err := yaml.Marshal(stringifyScalars(v))
+	if err != nil {
+		return fmt.Sprintf("%#v", v)
+	}
+	return string(b)
+}
+
+func stringifyScalars(v interface{}) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, val := range t {
+			out[k] = stringifyScalars(val)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, val := range t {
+			out[i] = stringifyScalars(val)
+		}
+		return out
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
+		return fmt.Sprint(t)
+	default:
+		return v
+	}
 }

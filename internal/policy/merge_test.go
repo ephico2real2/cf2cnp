@@ -80,3 +80,24 @@ func TestMergeInto_RefusesAnotherTarget(t *testing.T) {
 		t.Fatalf("expected an endpointSelector mismatch, got %v", err)
 	}
 }
+
+// Review finding: a hand-written `port: 80` (a YAML int) and the generated `port: "80"` are the same rule
+func TestMergeInto_PortIntEqualsPortString(t *testing.T) {
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal([]byte(`apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: shop, namespace: cf2cnp-lab}
+spec:
+  endpointSelector: {matchLabels: {app.kubernetes.io/name: shop}}
+  ingress:
+    - fromEndpoints: [{matchLabels: {app.kubernetes.io/name: pos}}]
+      toPorts: [{ports: [{port: 80, protocol: TCP}]}]
+`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	ps, _ := NewGenerator("").BuildPolicies(load(t, "ingress-pos-to-shop.json"))
+	added, err := MergeInto(doc, ps[0])
+	if err != nil || added != 0 {
+		t.Fatalf("port: 80 and port: \"80\" are one rule; added=%d err=%v", added, err)
+	}
+}
