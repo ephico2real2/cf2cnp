@@ -1,4 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- if and .Values.dns.resolver (not .Values.networkPolicy.dnsEgress) }}
+{{- fail "networkPolicy.dnsEgress must be set when dns.resolver is set: this policy would otherwise allow kube-system/kube-dns:53, not the resolver the server names (review ENH-003)" }}
+{{- end }}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:

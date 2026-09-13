@@ -159,3 +159,28 @@ func TestEmbeddedCRDVersionMatchesModule(t *testing.T) {
 		t.Fatalf("embedded CRD %q, go.mod requires %q — run go generate ./internal/crd", crd.Version(), want)
 	}
 }
+
+// Review ENH-003, second pass (Cursor): the official CoreDNS Helm chart labels its pods app.kubernetes.io/name=coredns
+// (and k8s-app=coredns only as a cluster service); extractLabels keeps the app.kubernetes.io/* labels and drops
+// k8s-app when they are present, so the derivation saw {app.kubernetes.io/name: coredns}, found no resolver, and
+// fell back to a kube-dns rule that selects none of those pods. The resolver is recognised by whichever identifying
+// label the parser kept, and the rule names that label.
+func TestDeriveDNSResolver_HelmCoreDNSLabels(t *testing.T) {
+	ps, err := NewGenerator("").WithDNSVisibility().BuildPolicies(load(t, "egress-pos-to-helm-coredns.json", "egress-pos-to-world.json"))
+	if err != nil || len(ps) != 1 {
+		t.Fatalf("one policy: %d %v", len(ps), err)
+	}
+	dns := ps[0].Spec.Egress[len(ps[0].Spec.Egress)-1]
+	labels := MatchLabelsOf(dns.ToEndpoints[0])
+	if labels["io.kubernetes.pod.namespace"] != "dns-system" || labels["app.kubernetes.io/name"] != "coredns" || len(labels) != 2 {
+		t.Fatalf("the resolver rule must name the label the parser kept: %v", labels)
+	}
+	if p := dns.ToPorts[0].Ports[0]; p.Port != "53" || p.Protocol != "ANY" || dns.ToPorts[0].Rules == nil {
+		t.Fatalf("53/ANY with the L7 rule: %s", mustYAML(dns))
+	}
+	f := &aggregator.AggregatedFlow{Direction: "EGRESS", DestNamespace: "dns-system",
+		DestLabels: map[string]string{"app": "coredns"}, Ports: []aggregator.PortInfo{{Port: 53, Protocol: "UDP"}}}
+	if r, ok := DeriveDNSResolver([]*aggregator.AggregatedFlow{f}); !ok || r.Labels["app"] != "coredns" {
+		t.Fatalf("app=coredns is a resolver too: %+v %v", r, ok)
+	}
+}

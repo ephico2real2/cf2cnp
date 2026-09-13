@@ -226,7 +226,9 @@ move — and then Codex refuted "as observed" for the derived rule too: a UDP-on
 truncated answer, a failure that appears only on the day a large answer comes; the derived rule is `ANY` as well,
 and the two goldens whose resolver rule 0.6.3 wrote as `UDP` were regenerated (`internal/testdata/golden/README.md`).
 The derivation took every `kube-system` peer on 53/5353 as the resolver; it now takes CoreDNS / kube-dns and
-NodeLocal DNSCache by their `k8s-app` label (under a Local Redirect Policy the lookups reach the NodeLocal pod, and
+NodeLocal DNSCache by their identifying label — `k8s-app`, or `app.kubernetes.io/name` / `app` as the CoreDNS Helm
+chart labels them, whichever the parser kept (second pass: `extractLabels` drops `k8s-app` beside the
+`app.kubernetes.io/*` labels, so the first fix missed that chart) (under a Local Redirect Policy the lookups reach the NodeLocal pod, and
 the rule must name what the lookups reach) and OpenShift's operator by its namespace, nothing else. And `serve` takes
 the same two flags as a cluster-wide default (`dns.profile` / `dns.resolver` in the chart, which also drive the
 chart's own policy's DNS egress rule), because a Grafana action on OpenShift sends no `?dnsProfile=`.

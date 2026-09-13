@@ -113,8 +113,9 @@ func (g *Generator) resolveDNS(flows []*aggregator.AggregatedFlow) DNSResolver {
 }
 
 // DeriveDNSResolver finds the resolver in the observed flows: an EGRESS flow to a resolver pod (looksLikeDNS) on a
-// DNS port (53 or 5353). The rule then names that namespace, the identifying labels the pods carry (k8s-app=kube-dns
-// on Kubernetes; none on OpenShift, whose pods carry the operator's labels the naming does not use), the port as
+// DNS port (53 or 5353). The rule then names that namespace, the identifying label the pods carry (k8s-app=kube-dns
+// on kubeadm and the managed clusters, app.kubernetes.io/name=coredns from the CoreDNS Helm chart; none on OpenShift,
+// whose pods carry the operator's labels the naming does not use), the port as
 // observed — and the protocol ANY, whatever was observed: the rule exists to put the lookups through the proxy, not
 // to restrict a protocol, and a lookup whose UDP answer is truncated retries over TCP, which a UDP-only rule denies
 // under default-deny egress (review ENH-003; Cilium's examples write ANY; 0.6.x wrote the observed UDP).
@@ -132,10 +133,7 @@ func DeriveDNSResolver(flows []*aggregator.AggregatedFlow) (DNSResolver, bool) {
 				continue
 			}
 			if found == nil {
-				found = &DNSResolver{Namespace: f.DestNamespace, Port: fmt.Sprint(p.Port), Protocol: "ANY"}
-				if v, ok := f.DestLabels["k8s-app"]; ok {
-					found.Labels = map[string]string{"k8s-app": v}
-				}
+				found = &DNSResolver{Namespace: f.DestNamespace, Port: fmt.Sprint(p.Port), Protocol: "ANY", Labels: resolverIDLabels(f.DestLabels)}
 			}
 		}
 	}
@@ -145,16 +143,29 @@ func DeriveDNSResolver(flows []*aggregator.AggregatedFlow) (DNSResolver, bool) {
 	return *found, true
 }
 
+// resolverLabelKeys are the identifying labels a resolver pod may carry, in the order the parser prefers them:
+// kubeadm, kind and the managed clusters label CoreDNS k8s-app=kube-dns; the official CoreDNS Helm chart labels
+// app.kubernetes.io/name=coredns (and k8s-app=coredns only as a cluster service) — and extractLabels keeps the
+// app.kubernetes.io/* labels and drops k8s-app when they are present (review ENH-003, second pass).
+var resolverLabelKeys = []string{"k8s-app", "app.kubernetes.io/name", "app"}
+
+// resolverIDLabels returns the one label that identifies a resolver pod among the labels the parser kept, or nil
+func resolverIDLabels(labels map[string]string) map[string]string {
+	for _, key := range resolverLabelKeys {
+		switch labels[key] {
+		case "kube-dns", "coredns", "node-local-dns":
+			return map[string]string{key: labels[key]}
+		}
+	}
+	return nil
+}
+
 // looksLikeDNS says whether a peer on a DNS port is the resolver: CoreDNS / kube-dns by its label, NodeLocal DNSCache
 // by its label (under a Local Redirect Policy the lookups reach that pod, so the rule must name it — a rule naming
 // kube-dns would cut the pod off), or OpenShift's DNS operator by its namespace (its pods carry no k8s-app label,
 // Cilium's DNS guide). Anything else in kube-system on 53 is not the resolver (review ENH-003).
 func looksLikeDNS(namespace string, labels map[string]string) bool {
-	switch labels["k8s-app"] {
-	case "kube-dns", "coredns", "node-local-dns":
-		return true
-	}
-	return namespace == "openshift-dns"
+	return resolverIDLabels(labels) != nil || namespace == "openshift-dns"
 }
 
 // dnsRule is the egress rule for the resolver in use: the pods it names on their port, with the L7 DNS rule that

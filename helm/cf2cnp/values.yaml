@@ -71,7 +71,8 @@ networkPolicy:
   #   - matchLabels: {app.kubernetes.io/name: grafana, io.kubernetes.pod.namespace: monitoring}
   fromEndpoints: []
   # The egress rule to the cluster's DNS follows dns.profile (kube-dns 53/ANY, or openshift-dns 5353/ANY). When
-  # dns.resolver names other pods, write the rule for them here (one CiliumNetworkPolicy egress rule), e.g.
+  # dns.resolver names other pods, write the rule for them here (one CiliumNetworkPolicy egress rule; the chart
+  # refuses to render a policy that would cut the pod off from a named resolver), e.g.
   #   toEndpoints: [{matchLabels: {io.kubernetes.pod.namespace: dns-system, app: coredns}}]
   #   toPorts: [{ports: [{port: "5353", protocol: ANY}]}]
   dnsEgress: {}

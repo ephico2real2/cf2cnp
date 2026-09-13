@@ -149,3 +149,23 @@ spec:
 		t.Fatalf("egress must be created after ingress; added=%d err=%v out:\n%s", added, err, out)
 	}
 }
+
+// Review ENH-003, second pass (Cursor): a document in Cilium's `specs` form has no `spec`; merge writes spec.ingress
+// and spec.egress, so it refuses such a document — and says so, instead of "no metadata/spec".
+func TestMergeDocument_SpecsOnlyIsRefusedByName(t *testing.T) {
+	existing := `apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata: {name: shop, namespace: cf2cnp-lab}
+specs:
+  - endpointSelector: {matchLabels: {app.kubernetes.io/name: shop}}
+    ingressDeny: [{fromEntities: [world]}]
+`
+	ps, err := NewGenerator("").BuildPolicies(load(t, "ingress-pos-to-shop.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = MergeDocument([]byte(existing), ps[0])
+	if err == nil || !strings.Contains(err.Error(), "specs") {
+		t.Fatalf("a specs-only document is refused by name: %v", err)
+	}
+}

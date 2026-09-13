@@ -27,8 +27,14 @@ func MergeDocument(existing []byte, generated *CiliumNetworkPolicy) (out []byte,
 	}
 	root := doc.Content[0]
 	meta, spec := mappingValue(root, "metadata"), mappingValue(root, "spec")
-	if meta == nil || spec == nil {
-		return nil, 0, errors.New("existing document has no metadata/spec")
+	if meta == nil {
+		return nil, 0, errors.New("existing document has no metadata")
+	}
+	if spec == nil {
+		if mappingValue(root, "specs") != nil { // Cilium's list form: merge writes spec.ingress / spec.egress only
+			return nil, 0, errors.New("existing document uses specs (Cilium's list form), which merge does not write into: move the rule to spec, or edit the file by hand")
+		}
+		return nil, 0, errors.New("existing document has no spec")
 	}
 	if err := checkTarget(meta, spec, generated); err != nil {
 		return nil, 0, err
