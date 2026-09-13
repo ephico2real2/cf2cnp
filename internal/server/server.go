@@ -164,6 +164,52 @@ func validHost(v string) string {
 	return v
 }
 
+// excludeFlows drops flows whose peer carries any of the excluded label=value pairs (E4). The peer is the
+// side the rule would name: the source for an INGRESS flow, the destination for EGRESS. This is the
+// operator's intent ("stranger may call nothing") applied at generation time instead of at collection time.
+func excludeFlows(flows []*flow.ParsedFlow, excludes []string) []*flow.ParsedFlow {
+	if len(excludes) == 0 {
+		return flows
+	}
+	kept := make([]*flow.ParsedFlow, 0, len(flows))
+	for _, f := range flows {
+		peer := f.SourceLabels
+		if f.Direction == "EGRESS" {
+			peer = f.DestLabels
+		}
+		if !peerMatches(peer, excludes) {
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
+// peerMatches reports whether the labels carry one of the excludes. An exclude is "key=value", or several
+// joined by commas that must ALL match — the page sends a peer's whole identifying set
+// (app.kubernetes.io/name=shop,app.kubernetes.io/component=frontend), so unticking one component never
+// removes the others (review finding); a single key=value still works and matches every peer carrying it.
+func peerMatches(labels map[string]string, excludes []string) bool {
+	for _, ex := range excludes {
+		all := true
+		n := 0
+		for _, pair := range strings.Split(ex, ",") {
+			kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			n++
+			if labels[kv[0]] != kv[1] {
+				all = false
+				break
+			}
+		}
+		if n > 0 && all {
+			return true
+		}
+	}
+	return false
+}
+
 // wantsJSON reports whether the client asked for the JSON answer (Grafana's action sets
 // X-Grafana-Action; any client may send Accept: application/json)
 func wantsJSON(r *http.Request) bool {
@@ -332,6 +378,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         .controls { margin: 8px 0; }
         .controls label { display: block; margin-bottom: 4px; color: #cbd5e1; font-weight: 600; }
         .controls input { width: 100%; box-sizing: border-box; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-family: monospace; }
+        .peers label { display: inline-block; margin: 4px 12px 4px 0; color: #cbd5e1; }
+        .peers .muted { margin-left: 4px; }
         .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
         .buttons button { margin: 0; }
         button.secondary { background: #1e293b; border: 1px solid #334155; box-shadow: none; }
@@ -407,6 +455,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
     <code>hubble observe -o json</code>). Flows to the same workload become one policy with one rule per peer.</p>
     <textarea id="flowInput" placeholder='{"flow": {"traffic_direction": "INGRESS", ...}}' oninput="summarize()"></textarea>
     <div id="summary" class="summary"></div>
+    <div id="peers" class="peers"></div>
     <div class="controls">
         <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
         <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
@@ -461,6 +510,42 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             if (comp && comp !== name) name += '/' + comp;
             return name;
         }
+        // peerKey is the identifying label set the policy would name for a peer, joined by commas — the same labels
+        // the server's extractLabels keeps: every app.kubernetes.io/{name,component,instance} present, else the first
+        // fallback label (app, k8s-app, name, component, instance). Unticking a peer sends this whole set as one
+        // exclude, so one component never removes its siblings (review finding).
+        function peerKey(ep) {
+            const labels = (ep && ep.labels) || [];
+            const val = (k) => { const l = labels.find(x => x.startsWith('k8s:' + k + '=') || x.startsWith(k + '=')); return l ? l.split('=').slice(1).join('=') : null; };
+            const parts = [];
+            for (const k of ['app.kubernetes.io/name', 'app.kubernetes.io/component', 'app.kubernetes.io/instance']) { const v = val(k); if (v !== null) parts.push(k + '=' + v); }
+            if (parts.length) return parts.join(',');
+            for (const k of ['app', 'k8s-app', 'name', 'component', 'instance']) { const v = val(k); if (v !== null) return k + '=' + v; }
+            return '';
+        }
+        // renderPeers lists every distinct peer (the source of an INGRESS flow, the destination of an EGRESS one)
+        // as a checkbox; an unchecked peer becomes an exclude= parameter — review the intent before generating
+        function renderPeers(flows) {
+            const counts = {};
+            for (const d of flows) {
+                const f = d.flow || d; const ep = f.traffic_direction === 'EGRESS' ? f.destination : f.source;
+                const key = peerKey(ep); if (!key) continue;
+                counts[key] = (counts[key] || 0) + 1;
+            }
+            const box = document.getElementById('peers'); box.textContent = '';
+            const keys = Object.keys(counts).sort();
+            if (!keys.length) return;
+            const title = document.createElement('div'); title.className = 'summary'; title.textContent = 'Peers the policy would allow — untick to exclude:'; box.appendChild(title);
+            for (const k of keys) {
+                const label = document.createElement('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true; cb.dataset.peer = k;
+                label.appendChild(cb); label.appendChild(document.createTextNode(' ' + k.split(',').map(p => p.split('=').slice(1).join('=')).join('/')));
+                const m = document.createElement('span'); m.className = 'muted'; m.textContent = '(' + counts[k] + ' flow' + (counts[k] === 1 ? '' : 's') + ')'; label.appendChild(m);
+                box.appendChild(label);
+            }
+        }
+        function excludedPeers() {
+            return Array.from(document.querySelectorAll('#peers input[type=checkbox]')).filter(cb => !cb.checked).map(cb => cb.dataset.peer);
+        }
         function summarize() {
             const box = document.getElementById('summary');
             try {
@@ -472,6 +557,7 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
                     return (f.traffic_direction || '?') + ' ' + (f.verdict || '') + ' ' + who(f.source) + ' → ' + (names || who(f.destination)) + ':' + (port || '?') + (f.is_reply ? ' (reply — will be refused)' : '');
                 });
                 box.textContent = flows.length + ' flow(s) parsed: ' + lines.join(' | ') + (flows.length > 8 ? ' | …' : '');
+                renderPeers(flows);
             } catch (e) { box.textContent = 'Not valid JSON yet: ' + e.message; }
         }
         let lastYAML = '', lastFilename = 'ciliumnetworkpolicy.yaml';
@@ -482,6 +568,7 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             const params = []; if (name) params.push('name=' + encodeURIComponent(name));
             if (document.getElementById('l7').checked) params.push('l7=true');
             if (document.getElementById('dnsVisibility').checked) params.push('dnsVisibility=true');
+            for (const p of excludedPeers()) params.push('exclude=' + encodeURIComponent(p));
             const url = '/generate' + (params.length ? '?' + params.join('&') : '');
             try {
                 const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: input });
@@ -502,7 +589,7 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             const a = document.createElement('a'); a.href = url; a.download = lastFilename; a.click(); URL.revokeObjectURL(url);
         }
         function flash(id, text) { const b = document.getElementById(id); const old = b.textContent; b.textContent = text; setTimeout(() => b.textContent = old, 1200); }
-        function clearAll() { document.getElementById('flowInput').value = ''; document.getElementById('policyName').value = ''; document.getElementById('result').textContent = ''; document.getElementById('summary').textContent = ''; document.getElementById('apply').textContent = ''; setButtons(false); }
+        function clearAll() { document.getElementById('flowInput').value = ''; document.getElementById('policyName').value = ''; document.getElementById('result').textContent = ''; document.getElementById('summary').textContent = ''; document.getElementById('peers').textContent = ''; document.getElementById('apply').textContent = ''; setButtons(false); }
         function loadExample() {
             const ex = (src, uuid) => JSON.stringify({ flow: { uuid: uuid, verdict: 'AUDIT', IP: { source: '10.0.1.3', destination: '10.0.2.7', ipVersion: 'IPv4' },
                 l4: { TCP: { source_port: 45248, destination_port: 80, flags: { SYN: true } } },
@@ -594,9 +681,10 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	parsedFlows = excludeFlows(parsedFlows, r.URL.Query()["exclude"]) // E4: ?exclude=key=value, repeatable
 	aggregatedFlows := aggregator.AggregateFlows(parsedFlows)
 	if len(aggregatedFlows) == 0 {
-		http.Error(w, "No valid flows found in request", http.StatusBadRequest)
+		http.Error(w, "No valid flows found in request (every flow excluded, or none parsed)", http.StatusBadRequest)
 		return
 	}
 

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hubble-policy-gen/internal/flow"
 )
 
 func fixture(t *testing.T, name string) string {
@@ -201,5 +203,57 @@ func TestYolo_JSONUsesBaseURL(t *testing.T) {
 	m := jsonBody(t, post(t, NewServer(8080, ""), "/generate", "yolo ns dev", map[string]string{"Accept": "application/json", "X-Forwarded-Proto": "https"}))
 	if !strings.HasPrefix(m["download_url"].(string), "https://cf2cnp.example.test/download/") || m["filename"] != "dev-yolo-allow-all-in-namespace.yaml" {
 		t.Fatalf("%v", m)
+	}
+}
+
+// E4: ?exclude=key=value drops the flows whose peer carries it; the peer is the source for INGRESS
+func TestGenerate_ExcludePeers(t *testing.T) {
+	s := NewServer(8080, "")
+	body := fixture(t, "ingress-pos-to-shop.json") + "\n" + fixture(t, "ingress-stranger-to-shop.json")
+	rec := post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dstranger", body, nil)
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), "stranger") || !strings.Contains(rec.Body.String(), "pos") {
+		t.Fatalf("stranger must be gone, pos kept: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dnobody", body, nil)
+	if rec.Code != 200 || strings.Count(rec.Body.String(), "fromEndpoints") != 2 {
+		t.Fatalf("an exclude that matches nothing changes nothing: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dpos&exclude=app.kubernetes.io%2Fname%3Dstranger", body, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("everything excluded must be a 400, got %d", rec.Code)
+	}
+	// EGRESS: the peer is the destination; excluding the source does nothing
+	rec = post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dpos", fixture(t, "egress-pos-to-world.json"), nil)
+	if rec.Code != 200 {
+		t.Fatalf("egress flow: the source is not the peer, got %d", rec.Code)
+	}
+}
+
+// Review finding: a peer is identified by its whole priority label set — unticking shop/frontend must not remove
+// shop/backend, while a bare name=shop exclude still removes every shop component
+func TestExclude_WholeLabelSetAndSingleLabel(t *testing.T) {
+	front := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/name": "shop", "app.kubernetes.io/component": "frontend"}}
+	back := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/name": "shop", "app.kubernetes.io/component": "backend"}}
+	if n := excludeFlows([]*flow.ParsedFlow{front, back}, []string{"app.kubernetes.io/name=shop,app.kubernetes.io/component=frontend"}); len(n) != 1 || n[0] != back {
+		t.Fatalf("the whole set must exclude only the frontend, got %d", len(n))
+	}
+	if n := excludeFlows([]*flow.ParsedFlow{front, back}, []string{"app.kubernetes.io/name=shop"}); len(n) != 0 {
+		t.Fatalf("a bare name excludes every component, got %d", len(n))
+	}
+	inst := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/instance": "blue"}}
+	if n := excludeFlows([]*flow.ParsedFlow{inst}, []string{"app=payments"}); len(n) != 1 {
+		t.Fatalf("exclude=app= must not drop a peer the parser named by instance")
+	}
+	// the page's key lists exactly the parser's priority labels, then the fallbacks, in order
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	i := strings.Index(page, "function peerKey")
+	for _, k := range []string{"'app.kubernetes.io/name'", "'app.kubernetes.io/component'", "'app.kubernetes.io/instance'", "'app'", "'k8s-app'", "'name'", "'component'", "'instance'"} {
+		j := strings.Index(page[i:], k)
+		if j < 0 {
+			t.Fatalf("the page's peerKey must list %s", k)
+		}
+		i += j
 	}
 }
