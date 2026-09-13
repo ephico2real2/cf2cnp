@@ -14,6 +14,16 @@ A CLI tool that generates CiliumNetworkPolicies from Hubble flow data. This tool
 
 > **Caution:** This project was created with the help of AI. While I have extensive experience with Kubernetes and Cilium, I do not have the Go programming expertise to write this tool from scratch. AI assistance made it possible to bring this idea to life and share it with the community. Please be careful when using this tool in production environments. Always review generated policies before applying them to your cluster.
 
+## Binaries
+
+Every `v*` tag publishes `cf2cnp_<version>_<os>_<arch>.tar.gz` (linux and darwin, amd64 and arm64) with a
+checksums file on the tag's GitHub release, for pipelines that run `cf2cnp merge` without a Go toolchain:
+
+```bash
+curl -sSL -o cf2cnp.tgz https://github.com/ephico2real2/cf2cnp/releases/download/v0.6.0/cf2cnp_0.6.0_linux_amd64.tar.gz
+tar -xzf cf2cnp.tgz && sudo install cf2cnp /usr/local/bin/cf2cnp
+```
+
 ## Building
 
 Clone the repository and build the binary:
