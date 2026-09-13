@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -17,8 +18,10 @@ func TestValidate_RefusesWhatTheAgentRefuses(t *testing.T) {
 			FromCIDR:      CIDRSlice{"10.0.0.1/32"},
 		}}}}}
 	err := Validate(mixed)
-	if err == nil || !strings.Contains(err.Error(), "combining FromEndpoints and FromCIDR") {
-		t.Fatalf("expected the agent's refusal, got %v", err)
+	// Cilium names the two fields in whichever order its set iterates ("combining FromCIDR and FromEndpoints" on one
+	// run, the reverse on another — CI caught it); assert the words, not their order
+	if err == nil || !strings.Contains(err.Error(), "combining") || !strings.Contains(err.Error(), "FromCIDR") || !strings.Contains(err.Error(), "FromEndpoints") || !errors.Is(err, ErrInvalidPolicy) {
+		t.Fatalf("expected the agent's refusal wrapped in ErrInvalidPolicy, got %v", err)
 	}
 	bad := &CiliumNetworkPolicy{Metadata: metav1.ObjectMeta{Name: "x", Namespace: "y"}, Spec: Rule{
 		EndpointSelector: Selector(map[string]string{"app": "x"}),
@@ -44,4 +47,16 @@ func firstKey(m map[string]string) string {
 		return k
 	}
 	return ""
+}
+
+// An IPv6 address gets /128, not /32 — on both sides (0.6.x wrote /32 for every address, which Cilium refuses)
+func TestBuildPolicies_IPv6HostPrefixes(t *testing.T) {
+	ps, err := NewGenerator("").BuildPolicies(load(t, "ingress-world6-cidr-to-receiver.json"))
+	if err != nil || string(ps[0].Spec.Ingress[0].FromCIDR[0]) != "2001:db8::170/128" {
+		t.Fatalf("fromCIDR: %v %s", err, mustYAML(ps[0].Spec.Ingress))
+	}
+	ps, err = NewGenerator("").BuildPolicies(load(t, "egress-pos-to-world6.json"))
+	if err != nil || string(ps[0].Spec.Egress[0].ToCIDR[0]) != "2606:2800:21f:cb07:6820:80da:af6b:8b2c/128" {
+		t.Fatalf("toCIDR: %v %s", err, mustYAML(ps[0].Spec.Egress))
+	}
 }

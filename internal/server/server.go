@@ -788,7 +788,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	policies, yamlBytes, err := generator.GeneratePoliciesWithYAML(aggregatedFlows)
 	if err != nil {
-		if errors.Is(err, policy.ErrReplyFlow) || errors.Is(err, policy.ErrNameNeedsOnePolicy) {
+		if errors.Is(err, policy.ErrReplyFlow) || errors.Is(err, policy.ErrNameNeedsOnePolicy) || errors.Is(err, policy.ErrInvalidPolicy) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

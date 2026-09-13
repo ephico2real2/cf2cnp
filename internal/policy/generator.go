@@ -39,6 +39,10 @@ var ErrReplyFlow = errors.New("this is a reply packet - you need to allow the or
 // ErrNameNeedsOnePolicy is returned when a name override is requested but the flows produce more than one policy
 var ErrNameNeedsOnePolicy = errors.New("a policy name can only be set when the flows produce a single policy")
 
+// ErrInvalidPolicy wraps a refusal by Cilium's own rule checks (Validate); the API answers it with a 400 and the
+// agent's sentence, not a 500
+var ErrInvalidPolicy = errors.New("invalid CiliumNetworkPolicy")
+
 // Generator generates CiliumNetworkPolicies from aggregated flows
 type Generator struct {
 	outputDir     string
@@ -169,7 +173,7 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 func Validate(p *CiliumNetworkPolicy) error {
 	check := p.Spec.DeepCopy()
 	if err := check.Sanitize(); err != nil {
-		return fmt.Errorf("policy %s/%s is not a valid CiliumNetworkPolicy: %w", p.Metadata.Namespace, p.Metadata.Name, err)
+		return fmt.Errorf("%w %s/%s: %w", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, err)
 	}
 	return nil
 }
@@ -425,7 +429,7 @@ func (g *Generator) generateEntityIngressRules(policy *CiliumNetworkPolicy, f *a
 	if f.SourceEntity == "world" && len(f.SourceIPs) > 0 {
 		cidrs := make(CIDRSlice, 0, len(f.SourceIPs))
 		for _, ip := range f.SourceIPs {
-			cidrs = append(cidrs, api.CIDR(ip+"/32"))
+			cidrs = append(cidrs, hostCIDR(ip))
 		}
 		ingressRule.FromCIDR = cidrs
 		ingressRule.ToPorts = g.portRules(f)
@@ -500,7 +504,7 @@ func (g *Generator) generateWorldEgressRules(policy *CiliumNetworkPolicy, f *agg
 	// Convert destination IPs to CIDRs
 	cidrs := make(CIDRSlice, 0, len(f.DestIPs))
 	for _, ip := range f.DestIPs {
-		cidrs = append(cidrs, api.CIDR(ip+"/32"))
+		cidrs = append(cidrs, hostCIDR(ip))
 	}
 
 	// Rule for CIDR-based world traffic
@@ -718,6 +722,15 @@ func convertPorts(ports []aggregator.PortInfo) []Port {
 		}
 	}
 	return result
+}
+
+// hostCIDR is the single-address prefix for an observed address: /32 for IPv4, /128 for IPv6 (0.6.x wrote /32 for
+// both, which Cilium refuses for an IPv6 address)
+func hostCIDR(ip string) api.CIDR {
+	if strings.Contains(ip, ":") {
+		return api.CIDR(ip + "/128")
+	}
+	return api.CIDR(ip + "/32")
 }
 
 // copyLabels creates a copy of the labels map
