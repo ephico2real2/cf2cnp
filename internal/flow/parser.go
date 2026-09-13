@@ -143,6 +143,12 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 	parsed.DestNamespace = flow.Destination.Namespace
 	parsed.DestLabels = extractLabels(flow.Destination.Labels)
 
+	// ClusterMesh: which cluster each side is in. Since Cilium 1.19 a selector without
+	// io.cilium.k8s.policy.cluster matches the LOCAL cluster only, so a policy generated from a
+	// cross-cluster flow must name the peer's cluster or it excludes that very peer.
+	parsed.SourceCluster = flow.Source.ClusterName
+	parsed.DestCluster = flow.Destination.ClusterName
+
 	// Check if source is a reserved entity (remote-node, host, etc.)
 	parsed.SourceEntity = getReservedEntity(flow.Source.Labels)
 	parsed.IsSourceEntity = parsed.SourceEntity != ""
