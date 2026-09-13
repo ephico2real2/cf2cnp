@@ -493,11 +493,14 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             if (comp && comp !== name) name += '/' + comp;
             return name;
         }
-        // peerKey is the label the policy would name for a peer: the same priority cf2cnp uses (name, then app, k8s-app)
+        // peerKey is the label the policy would name for a peer — the FIRST label the server's extractLabels keeps,
+        // in its exact priority order (review finding: a peer with app.kubernetes.io/instance and a fallback app label
+        // is named by instance in the policy, so the checkbox must say instance, or the exclude never matches)
         function peerKey(ep) {
             const labels = (ep && ep.labels) || [];
-            for (const k of ['app.kubernetes.io/name', 'app', 'k8s-app']) {
-                const l = labels.find(x => x.startsWith('k8s:' + k + '='));
+            for (const k of ['app.kubernetes.io/name', 'app.kubernetes.io/component', 'app.kubernetes.io/instance',
+                             'app', 'k8s-app', 'name', 'component', 'instance']) {
+                const l = labels.find(x => x.startsWith('k8s:' + k + '=') || x.startsWith(k + '='));
                 if (l) return k + '=' + l.split('=').slice(1).join('=');
             }
             return '';

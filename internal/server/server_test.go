@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hubble-policy-gen/internal/flow"
 )
 
 func fixture(t *testing.T, name string) string {
@@ -224,5 +226,29 @@ func TestGenerate_ExcludePeers(t *testing.T) {
 	rec = post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dpos", fixture(t, "egress-pos-to-world.json"), nil)
 	if rec.Code != 200 {
 		t.Fatalf("egress flow: the source is not the peer, got %d", rec.Code)
+	}
+}
+
+// Review finding: the exclude key must be the label the parser keeps — a peer with only an instance label (no
+// name) is named by instance, and an exclude on its fallback app label must not match
+func TestExclude_UsesTheLabelTheParserKeeps(t *testing.T) {
+	f := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/instance": "blue"}}
+	if n := excludeFlows([]*flow.ParsedFlow{f}, []string{"app=payments"}); len(n) != 1 {
+		t.Fatalf("exclude=app= must not drop a peer the parser named by instance")
+	}
+	if n := excludeFlows([]*flow.ParsedFlow{f}, []string{"app.kubernetes.io/instance=blue"}); len(n) != 0 {
+		t.Fatalf("exclude=instance= must drop that peer")
+	}
+	// and the page's list is the parser's list, in order (kept in sync by this test reading the served page)
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	i := strings.Index(page, "function peerKey")
+	for _, k := range []string{"'app.kubernetes.io/name'", "'app.kubernetes.io/component'", "'app.kubernetes.io/instance'", "'app'", "'k8s-app'", "'name'", "'component'", "'instance'"} {
+		j := strings.Index(page[i:], k)
+		if j < 0 {
+			t.Fatalf("the page's peerKey must list %s", k)
+		}
+		i += j
 	}
 }
