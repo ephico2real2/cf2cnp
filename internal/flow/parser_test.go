@@ -95,16 +95,3 @@ func TestParseFlowsFromBytes_RejectsNonFlows(t *testing.T) {
 		t.Fatalf("two concatenated flows: %d %v", len(fs), err)
 	}
 }
-
-func TestCleanDNSQuery(t *testing.T) {
-	for in, want := range map[string]string{
-		"accounts.bank.svc.cluster.local.":                        "accounts.bank.svc.cluster.local",
-		"accounts.bank.svc.cluster.local.bank.svc.cluster.local.": "accounts.bank.svc.cluster.local",
-		"example.com.":                        "example.com",
-		"example.com.bank.svc.cluster.local.": "example.com.bank.svc.cluster.local", // one occurrence: kept as asked
-	} {
-		if got := cleanDNSQuery(in, ClusterDomain); got != want {
-			t.Fatalf("%q → %q, want %q", in, got, want)
-		}
-	}
-}

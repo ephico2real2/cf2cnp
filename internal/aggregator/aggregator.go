@@ -24,8 +24,6 @@ type AggregatedFlow struct {
 	IsWorldTraffic      bool              // True if destination is "world"
 	IsDestEntityTraffic bool              // True if destination is a reserved entity
 	IsReply             bool              // True if this is a reply packet
-	HTTPRequests        []HTTPRequest     // E2: distinct method+path seen on this peer pair
-	DNSQueries          []string          // E2: distinct names queried on this peer pair
 }
 
 // HTTPRequest is one distinct method + path seen on a peer pair (E2)
@@ -34,10 +32,13 @@ type HTTPRequest struct {
 	Path   string
 }
 
-// PortInfo represents a port and protocol combination
+// PortInfo represents a port and protocol combination, with the layer-7 records seen on it (E2). L7 is
+// per port: a rules: block on one port must not restrict another port of the same peer pair (review finding).
 type PortInfo struct {
-	Port     int
-	Protocol string
+	Port         int
+	Protocol     string
+	HTTPRequests []HTTPRequest // distinct method+path seen on this port
+	DNSQueries   []string      // distinct names queried on this port
 }
 
 // AggregateFlows groups flows by source/destination and aggregates ports
@@ -116,17 +117,26 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 	return result
 }
 
-// addL7 collects the flow's layer-7 records on the aggregated flow (E2). They do not change the key:
-// same peers, same port, more detail.
+// addL7 records the flow's layer-7 records on ITS port of the aggregated flow (E2)
 func addL7(agg *AggregatedFlow, f *flow.ParsedFlow) {
-	if f.HTTPMethod != "" || f.HTTPPath != "" {
-		r := HTTPRequest{Method: f.HTTPMethod, Path: f.HTTPPath}
-		if !containsRequest(agg.HTTPRequests, r) {
-			agg.HTTPRequests = append(agg.HTTPRequests, r)
-		}
+	if f.HTTPMethod == "" && f.HTTPPath == "" && f.DNSQuery == "" {
+		return
 	}
-	if f.DNSQuery != "" && !containsString(agg.DNSQueries, f.DNSQuery) {
-		agg.DNSQueries = append(agg.DNSQueries, f.DNSQuery)
+	for i := range agg.Ports {
+		p := &agg.Ports[i]
+		if p.Port != f.Port || p.Protocol != f.Protocol {
+			continue
+		}
+		if f.HTTPMethod != "" || f.HTTPPath != "" {
+			r := HTTPRequest{Method: f.HTTPMethod, Path: f.HTTPPath}
+			if !containsRequest(p.HTTPRequests, r) {
+				p.HTTPRequests = append(p.HTTPRequests, r)
+			}
+		}
+		if f.DNSQuery != "" && !containsString(p.DNSQueries, f.DNSQuery) {
+			p.DNSQueries = append(p.DNSQueries, f.DNSQuery)
+		}
+		return
 	}
 }
 

@@ -189,28 +189,15 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 			}
 		}
 		if flow.L7.DNS != nil {
-			parsed.DNSQuery = cleanDNSQuery(flow.L7.DNS.Query, ClusterDomain)
+			// The query exactly as the resolver sent it, trailing dot removed. A search-list expansion
+			// (accounts.bank.svc.cluster.local.bank.svc.cluster.local — ndots:5) is kept on purpose: an L7 DNS
+			// policy allows ONLY the names it lists ("No other DNS queries will be allowed", layer7.rst), and
+			// the resolver tries the expansions before the real name — deny them and lookups fail.
+			parsed.DNSQuery = strings.TrimSuffix(flow.L7.DNS.Query, ".")
 		}
 	}
 
 	return parsed, nil
-}
-
-// ClusterDomain is the cluster's DNS domain, used to recognise resolver search-list expansions
-const ClusterDomain = "cluster.local"
-
-// cleanDNSQuery strips the trailing dot and a Kubernetes search-list expansion (review finding). With ndots:5 a
-// pod asking for accounts.bank.svc.cluster.local (four dots) first tries accounts.bank.svc.cluster.local.bank.svc.cluster.local.
-// — Hubble records that request too; a matchName on it is noise nobody queries on purpose. When the cluster
-// domain appears twice, the name is cut after its first occurrence.
-func cleanDNSQuery(q, clusterDomain string) string {
-	q = strings.TrimSuffix(q, ".")
-	marker := "." + clusterDomain
-	first := strings.Index(q, marker+".")
-	if first >= 0 && strings.HasSuffix(q, marker) {
-		return q[:first+len(marker)]
-	}
-	return q
 }
 
 // extractLabels extracts and filters labels from Hubble label format

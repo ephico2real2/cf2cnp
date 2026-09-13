@@ -3,6 +3,7 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -201,8 +202,8 @@ func TestBuildPolicies_L7HTTPRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	rules := firstRules(ps)
-	if rules == nil || len(rules.HTTP) != 1 || rules.HTTP[0].Method != "GET" || rules.HTTP[0].Path != "^/api/balance/chk-1001$" {
-		t.Fatalf("expected one anchored GET rule for the measured path, got %+v", rules)
+	if rules == nil || len(rules.HTTP) != 1 || rules.HTTP[0].Method != "GET" || rules.HTTP[0].Path != `^/api/balance/chk-1001(\?.*)?$` {
+		t.Fatalf("expected one escaped GET rule for the measured path allowing a query, got %+v", rules)
 	}
 	plain, _ := NewGenerator("").BuildPolicies(load(t, "l7-http-request.json"))
 	if out, _ := EncodePolicies(plain); strings.Contains(string(out), "http:") {
@@ -226,22 +227,46 @@ func TestBuildPolicies_L7DNSRules(t *testing.T) {
 	}
 }
 
-// E2: regex metacharacters in a path are escaped
-func TestL7Rules_PathIsEscaped(t *testing.T) {
-	r := NewGenerator("").WithL7().l7Rules(&aggregator.AggregatedFlow{HTTPRequests: []aggregator.HTTPRequest{{Method: "GET", Path: "/v1/items.json"}}})
-	if r.HTTP[0].Path != `^/v1/items\.json$` {
-		t.Fatalf("got %q", r.HTTP[0].Path)
+// E2: regex metacharacters in a path are escaped, and a query string is allowed (Envoy matches the whole :path)
+func TestL7Rules_PathIsEscapedAndAllowsAQuery(t *testing.T) {
+	r := l7RulesFor(aggregator.PortInfo{Port: 80, Protocol: "TCP", HTTPRequests: []aggregator.HTTPRequest{{Method: "GET", Path: "/v1/items.json"}}})
+	want := `^/v1/items\.json(\?.*)?$`
+	if r.HTTP[0].Path != want {
+		t.Fatalf("got %q want %q", r.HTTP[0].Path, want)
+	}
+	re := regexp.MustCompile(r.HTTP[0].Path)
+	for path, ok := range map[string]bool{"/v1/items.json": true, "/v1/items.json?x=1": true, "/v1/itemsXjson": false, "/v1/items.json/extra": false} {
+		if re.MatchString(path) != ok {
+			t.Fatalf("%q matched=%v, want %v", path, !ok, ok)
+		}
 	}
 }
 
-// Review finding: the measured DNS request is a search-list expansion; the rule must name the real name
-func TestBuildPolicies_L7DNSRules_StripsSearchDomain(t *testing.T) {
+// Review finding: L7 records belong to the port they were seen on — an HTTP rule on 8080 must not restrict 5432
+func TestBuildPolicies_L7RulesArePerPort(t *testing.T) {
+	agg := &aggregator.AggregatedFlow{Direction: "INGRESS", DestNamespace: "bank", DestLabels: map[string]string{"app": "api"},
+		SourceNamespace: "bank", SourceLabels: map[string]string{"app": "web"},
+		Ports: []aggregator.PortInfo{{Port: 5432, Protocol: "TCP"}, {Port: 8080, Protocol: "TCP", HTTPRequests: []aggregator.HTTPRequest{{Method: "POST", Path: "/payments"}}}}}
+	ps, _ := NewGenerator("").WithL7().BuildPolicies([]*aggregator.AggregatedFlow{agg})
+	tp := ps[0].Spec.Ingress[0].ToPorts
+	if len(tp) != 2 || tp[0].Rules != nil || tp[0].Ports[0].Port != "5432" || tp[1].Rules == nil || tp[1].Ports[0].Port != "8080" {
+		t.Fatalf("expected [5432 plain] [8080 with rules], got %+v", tp)
+	}
+	plain, _ := NewGenerator("").BuildPolicies([]*aggregator.AggregatedFlow{agg})
+	if n := len(plain[0].Spec.Ingress[0].ToPorts); n != 1 {
+		t.Fatalf("without WithL7 the ports stay in one rule, got %d", n)
+	}
+}
+
+// Both reviewers weighed in and the docs decide: an L7 DNS policy allows ONLY the names it lists, and the
+// resolver tries the search-list expansions first — so the measured expansion is kept exactly as observed
+func TestBuildPolicies_L7DNSRules_KeepsTheQueryAsObserved(t *testing.T) {
 	ps, err := NewGenerator("").WithL7().BuildPolicies(load(t, "l7-dns-request.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	rules := firstRules(ps)
-	if rules == nil || len(rules.DNS) != 1 || rules.DNS[0].MatchName != "accounts.bank.svc.cluster.local" {
-		t.Fatalf("ndots expansion must be stripped, got %+v", rules)
+	if rules == nil || len(rules.DNS) != 1 || rules.DNS[0].MatchName != "accounts.bank.svc.cluster.local.bank.svc.cluster.local" {
+		t.Fatalf("the query must be kept as the resolver sent it, got %+v", rules)
 	}
 }
