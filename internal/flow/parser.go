@@ -189,11 +189,28 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 			}
 		}
 		if flow.L7.DNS != nil {
-			parsed.DNSQuery = strings.TrimSuffix(flow.L7.DNS.Query, ".")
+			parsed.DNSQuery = cleanDNSQuery(flow.L7.DNS.Query, ClusterDomain)
 		}
 	}
 
 	return parsed, nil
+}
+
+// ClusterDomain is the cluster's DNS domain, used to recognise resolver search-list expansions
+const ClusterDomain = "cluster.local"
+
+// cleanDNSQuery strips the trailing dot and a Kubernetes search-list expansion (review finding). With ndots:5 a
+// pod asking for accounts.bank.svc.cluster.local (four dots) first tries accounts.bank.svc.cluster.local.bank.svc.cluster.local.
+// — Hubble records that request too; a matchName on it is noise nobody queries on purpose. When the cluster
+// domain appears twice, the name is cut after its first occurrence.
+func cleanDNSQuery(q, clusterDomain string) string {
+	q = strings.TrimSuffix(q, ".")
+	marker := "." + clusterDomain
+	first := strings.Index(q, marker+".")
+	if first >= 0 && strings.HasSuffix(q, marker) {
+		return q[:first+len(marker)]
+	}
+	return q
 }
 
 // extractLabels extracts and filters labels from Hubble label format

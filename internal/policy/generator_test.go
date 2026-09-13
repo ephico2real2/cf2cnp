@@ -233,3 +233,15 @@ func TestL7Rules_PathIsEscaped(t *testing.T) {
 		t.Fatalf("got %q", r.HTTP[0].Path)
 	}
 }
+
+// Review finding: the measured DNS request is a search-list expansion; the rule must name the real name
+func TestBuildPolicies_L7DNSRules_StripsSearchDomain(t *testing.T) {
+	ps, err := NewGenerator("").WithL7().BuildPolicies(load(t, "l7-dns-request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := firstRules(ps)
+	if rules == nil || len(rules.DNS) != 1 || rules.DNS[0].MatchName != "accounts.bank.svc.cluster.local" {
+		t.Fatalf("ndots expansion must be stripped, got %+v", rules)
+	}
+}
