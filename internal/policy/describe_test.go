@@ -10,12 +10,12 @@ func TestDescribe(t *testing.T) {
 		want string
 	}{
 		{"ingress with L7 and a second peer",
-			CiliumNetworkPolicy{Metadata: Metadata{Name: "shop-frontend", Namespace: "cf2cnp-lab27"}, Spec: Spec{Ingress: []IngressRule{
+			CiliumNetworkPolicy{Metadata: Metadata{Name: "shop-frontend", Namespace: "cf2cnp-lab27"}, Spec: Spec{EndpointSelector: LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "shop", "app.kubernetes.io/component": "frontend"}}, Ingress: []IngressRule{
 				{FromEndpoints: []LabelSelector{{MatchLabels: map[string]string{"app.kubernetes.io/name": "pos"}}},
 					ToPorts: []PortRule{{Ports: []Port{{Port: "80", Protocol: "TCP"}}, Rules: &L7Rules{HTTP: []HTTPRule{{Method: "GET", Path: `^/(\?.*)?$`}, {Method: "GET", Path: `^/checkout(\?.*)?$`}}}}}},
 				{FromEndpoints: []LabelSelector{{MatchLabels: map[string]string{"app.kubernetes.io/name": "kiosk"}}}, ToPorts: []PortRule{{Ports: []Port{{Port: "80", Protocol: "TCP"}}}}},
 			}}},
-			"Allow ingress to shop-frontend in cf2cnp-lab27: from pos on TCP/80 (HTTP GET /, GET /checkout); from kiosk on TCP/80"},
+			"Allow ingress to shop/frontend in cf2cnp-lab27: from pos on TCP/80 (HTTP GET /, GET /checkout); from kiosk on TCP/80"},
 		{"egress: another namespace, DNS rule, FQDN, CIDR",
 			CiliumNetworkPolicy{Metadata: Metadata{Name: "pos", Namespace: "cf2cnp-lab"}, Spec: Spec{Egress: []EgressRule{
 				{ToEndpoints: []LabelSelector{{MatchLabels: map[string]string{"app.kubernetes.io/name": "shop"}}}, ToPorts: []PortRule{{Ports: []Port{{Port: "80", Protocol: "TCP"}}}}},
@@ -25,11 +25,11 @@ func TestDescribe(t *testing.T) {
 			}}},
 			"Allow egress from pos in cf2cnp-lab: to shop on TCP/80; to kube-dns in kube-system on UDP/53 (DNS *); to example.com on TCP/443; to 104.20.23.154/32 on TCP/443"},
 		{"a ClusterMesh peer with a component, and entities",
-			CiliumNetworkPolicy{Metadata: Metadata{Name: "cache-server", Namespace: "mesh-lab"}, Spec: Spec{Ingress: []IngressRule{
+			CiliumNetworkPolicy{Metadata: Metadata{Name: "cache-server", Namespace: "mesh-lab"}, Spec: Spec{EndpointSelector: LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": "cache", "app.kubernetes.io/component": "server"}}, Ingress: []IngressRule{
 				{FromEndpoints: []LabelSelector{{MatchLabels: map[string]string{"app.kubernetes.io/name": "worker", "app.kubernetes.io/component": "batch", ClusterLabel: "poc2"}}}, ToPorts: []PortRule{{Ports: []Port{{Port: "6379", Protocol: "TCP"}}}}},
 				{FromEntities: []string{"ingress", "host"}, ToPorts: []PortRule{{Ports: []Port{{Port: "8080", Protocol: "TCP"}}}}},
 			}}},
-			"Allow ingress to cache-server in mesh-lab: from worker/batch in cluster poc2 on TCP/6379; from entities ingress, host on TCP/8080"},
+			"Allow ingress to cache/server in mesh-lab: from worker/batch in cluster poc2 on TCP/6379; from entities ingress, host on TCP/8080"},
 		{"both directions, an unnamed label, no ports",
 			CiliumNetworkPolicy{Metadata: Metadata{Name: "api", Namespace: "bank"}, Spec: Spec{
 				Ingress: []IngressRule{{FromEndpoints: []LabelSelector{{MatchLabels: map[string]string{"tier": "web"}}}}},

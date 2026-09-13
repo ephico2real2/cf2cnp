@@ -13,15 +13,21 @@ import (
 // subject is, which peers it may talk to, on which ports, with which L7 rules — instead of a generic sentence
 // about namespaces. It runs once the rules are final (after the merge across flows), on every policy:
 //
-//	Allow ingress to shop-frontend in cf2cnp-lab27: from pos on TCP/80 (HTTP GET /, GET /checkout); from kiosk on TCP/80
+//	Allow ingress to shop/frontend in cf2cnp-lab27: from pos on TCP/80 (HTTP GET /, GET /checkout); from kiosk on TCP/80
 //	Allow egress from pos in cf2cnp-lab: to shop on TCP/80; to kube-dns in kube-system on UDP/53 (DNS *); to example.com on TCP/443
-//	Allow ingress to cache-server in mesh-lab: from worker/batch in cluster poc2 on TCP/6379
+//	Allow ingress to cache/server in mesh-lab: from worker/batch in cluster poc2 on TCP/6379
 //
 // Peers are named the way the selector names them (name, then component and instance), a peer in another namespace
 // or cluster says so, entities and CIDRs are listed as written. A long policy is cut after maxDescribedRules peers
 // with "and N more", so the description stays a sentence, not a second copy of the spec.
 func Describe(p *CiliumNetworkPolicy) string {
-	subject := fmt.Sprintf("%s in %s", p.Metadata.Name, p.Metadata.Namespace)
+	// the subject is named the way the peers are (name/component/instance from the selector), so the sentence reads
+	// "shop/frontend … from shop/backend"; a policy without a selector falls back to its object name
+	subject := describeSelector(p.Spec.EndpointSelector.MatchLabels)
+	if len(p.Spec.EndpointSelector.MatchLabels) == 0 {
+		subject = p.Metadata.Name
+	}
+	subject += " in " + p.Metadata.Namespace
 	var parts []string
 	if n := len(p.Spec.Ingress); n > 0 {
 		items := make([]string, 0, n)
