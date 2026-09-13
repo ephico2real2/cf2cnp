@@ -1,0 +1,184 @@
+package policy
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/hubble-policy-gen/internal/aggregator"
+	"github.com/hubble-policy-gen/internal/flow"
+)
+
+// The DNS resolver rule — the egress rule that lets the selected endpoints ask the cluster's DNS and puts their
+// lookups through Cilium's DNS proxy, which every toFQDNs rule needs and --dns-visibility asks for — used to be one
+// hard-coded shape: kube-system, k8s-app=kube-dns, 53/UDP. That is a kind or kubeadm cluster. OpenShift's DNS
+// operator runs CoreDNS in openshift-dns, listening on 5353, without that label, and Cilium's own guide says so:
+// "OpenShift users will need to modify the policies to match the namespace openshift-dns (instead of kube-system),
+// remove the match on the k8s:k8s-app=kube-dns label, and change the port to 5353". A policy with the wrong resolver
+// rule cuts the pod off from DNS the moment it is enforced.
+//
+// Since 0.7.0 the resolver is DERIVED from the observed DNS flows when the input has them (the pods the workload
+// actually asked, on the port and protocol it used), and taken from a profile when it does not.
+
+// DNSResolver is where the cluster's DNS answers, as a policy names it
+type DNSResolver struct {
+	Namespace string            // the resolver pods' namespace
+	Labels    map[string]string // identifying labels of the resolver pods, if any (OpenShift: none)
+	Port      string            // "53" on Kubernetes, "5353" on OpenShift
+	Protocol  string            // UDP, TCP or ANY
+}
+
+// DNS profiles: what to write when the flows do not show the resolver
+const (
+	DNSProfileAuto       = "auto"       // from the flows, else kubernetes
+	DNSProfileKubernetes = "kubernetes" // kube-system, k8s-app=kube-dns, 53/UDP — what cf2cnp always wrote
+	DNSProfileOpenShift  = "openshift"  // openshift-dns, no label, 5353/ANY — Cilium's DNS guide for OpenShift
+)
+
+var dnsProfiles = map[string]DNSResolver{
+	DNSProfileKubernetes: {Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}, Port: "53", Protocol: "UDP"},
+	DNSProfileOpenShift:  {Namespace: "openshift-dns", Port: "5353", Protocol: "ANY"},
+}
+
+// WithDNSProfile chooses the resolver profile: auto (default), kubernetes or openshift
+func (g *Generator) WithDNSProfile(name string) (*Generator, error) {
+	switch name {
+	case "", DNSProfileAuto, DNSProfileKubernetes, DNSProfileOpenShift:
+		g.dnsProfile = name
+		if name == "" {
+			g.dnsProfile = DNSProfileAuto
+		}
+		return g, nil
+	}
+	return g, fmt.Errorf("unknown DNS profile %q (auto, kubernetes, openshift; or --dns-resolver)", name)
+}
+
+// WithDNSResolver names the resolver explicitly: "<namespace>[/<label>=<value>[,<label>=<value>]]:<port>[/<protocol>]",
+// e.g. "kube-system/k8s-app=kube-dns:53/UDP" or "openshift-dns:5353/ANY"
+func (g *Generator) WithDNSResolver(spec string) (*Generator, error) {
+	r, err := ParseDNSResolver(spec)
+	if err != nil {
+		return g, err
+	}
+	g.dnsResolver = &r
+	return g, nil
+}
+
+// ParseDNSResolver parses the --dns-resolver form
+func ParseDNSResolver(spec string) (DNSResolver, error) {
+	var r DNSResolver
+	i := strings.LastIndex(spec, ":")
+	if i <= 0 || i == len(spec)-1 {
+		return r, fmt.Errorf("dns resolver %q: want <namespace>[/<label>=<value>]:<port>[/<protocol>]", spec)
+	}
+	where, portProto := spec[:i], spec[i+1:]
+	r.Port, r.Protocol = portProto, "UDP"
+	if j := strings.Index(portProto, "/"); j > 0 {
+		r.Port, r.Protocol = portProto[:j], strings.ToUpper(portProto[j+1:])
+	}
+	r.Namespace = where
+	if j := strings.Index(where, "/"); j > 0 {
+		r.Namespace = where[:j]
+		r.Labels = map[string]string{}
+		for _, kv := range strings.Split(where[j+1:], ",") {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok || k == "" {
+				return r, fmt.Errorf("dns resolver %q: label %q is not key=value", spec, kv)
+			}
+			r.Labels[k] = v
+		}
+	}
+	if r.Namespace == "" {
+		return r, fmt.Errorf("dns resolver %q: the namespace is empty", spec)
+	}
+	return r, nil
+}
+
+// resolveDNS decides the resolver for this run: an explicit --dns-resolver, an explicit profile, or (auto) what the
+// flows show — falling back to the kubernetes profile when no DNS flow is among them
+func (g *Generator) resolveDNS(flows []*aggregator.AggregatedFlow) DNSResolver {
+	if g.dnsResolver != nil {
+		return *g.dnsResolver
+	}
+	if g.dnsProfile != "" && g.dnsProfile != DNSProfileAuto {
+		return dnsProfiles[g.dnsProfile]
+	}
+	if r, ok := DeriveDNSResolver(flows); ok {
+		return r
+	}
+	return dnsProfiles[DNSProfileKubernetes]
+}
+
+// DeriveDNSResolver finds the resolver in the observed flows: an EGRESS flow to a pod on a DNS port (53 or 5353) in a
+// DNS namespace or with a DNS label. The rule then names that namespace, the identifying labels the pods carry
+// (k8s-app=kube-dns on Kubernetes; none on OpenShift, whose pods carry the operator's labels the naming does not use),
+// the port as observed, and ANY when both UDP and TCP lookups were seen.
+func DeriveDNSResolver(flows []*aggregator.AggregatedFlow) (DNSResolver, bool) {
+	var found *DNSResolver
+	protocols := map[string]bool{}
+	for _, f := range flows {
+		if f.Direction != "EGRESS" || f.IsReply || f.IsWorldTraffic || f.IsDestEntityTraffic {
+			continue
+		}
+		for _, p := range f.Ports {
+			if p.Port != 53 && p.Port != 5353 {
+				continue
+			}
+			if !looksLikeDNS(f.DestNamespace, f.DestLabels) {
+				continue
+			}
+			if found == nil {
+				found = &DNSResolver{Namespace: f.DestNamespace, Port: fmt.Sprint(p.Port)}
+				if v, ok := f.DestLabels["k8s-app"]; ok {
+					found.Labels = map[string]string{"k8s-app": v}
+				}
+			}
+			protocols[strings.ToUpper(p.Protocol)] = true
+		}
+	}
+	if found == nil {
+		return DNSResolver{}, false
+	}
+	switch {
+	case protocols["UDP"] && protocols["TCP"]:
+		found.Protocol = "ANY"
+	case protocols["TCP"]:
+		found.Protocol = "TCP"
+	default:
+		found.Protocol = "UDP"
+	}
+	return *found, true
+}
+
+func looksLikeDNS(namespace string, labels map[string]string) bool {
+	if labels["k8s-app"] == "kube-dns" || labels["k8s-app"] == "coredns" {
+		return true
+	}
+	return namespace == "kube-system" || namespace == "openshift-dns"
+}
+
+// dnsRule is the egress rule for the resolver in use: the pods it names on their port, with the L7 DNS rule that
+// puts every lookup through the proxy (matchPattern "*": visibility, not restriction)
+func (g *Generator) dnsRule() EgressRule {
+	return dnsRuleFor(g.resolver)
+}
+
+func dnsRuleFor(r DNSResolver) EgressRule {
+	labels := map[string]string{flow.GetNamespaceLabel(): r.Namespace}
+	keys := make([]string, 0, len(r.Labels))
+	for k := range r.Labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		labels[k] = r.Labels[k]
+	}
+	return EgressRule{
+		EgressCommonRule: EgressCommonRule{ToEndpoints: []EndpointSelector{Selector(labels)}},
+		ToPorts: PortRules{{
+			Ports: []Port{{Port: r.Port, Protocol: api.L4Proto(r.Protocol)}},
+			Rules: &L7Rules{DNS: []DNSRule{{MatchPattern: "*"}}},
+		}},
+	}
+}

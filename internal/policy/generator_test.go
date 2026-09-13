@@ -354,7 +354,7 @@ func TestBuildPolicies_DNSVisibilityCompanion(t *testing.T) {
 	if len(ps[0].Spec.Egress) != 2 {
 		t.Fatalf("with the option: two rules, got %d", len(ps[0].Spec.Egress))
 	}
-	if mustYAML(ps[0].Spec.Egress[1]) != mustYAML(dnsVisibilityRule()) {
+	if mustYAML(ps[0].Spec.Egress[1]) != mustYAML(dnsRuleFor(dnsProfiles[DNSProfileKubernetes])) {
 		t.Fatalf("the second rule must be the DNS visibility rule:\n%s", mustYAML(ps[0].Spec.Egress[1]))
 	}
 	out, _ := EncodePolicies(ps)
@@ -386,5 +386,24 @@ func TestDNSVisibility_OneKubeDNSRule(t *testing.T) {
 	plain, _ := NewGenerator("").BuildPolicies(load(t, "egress-pos-to-kube-dns.json", "egress-pos-to-world.json"))
 	if n := len(plain[0].Spec.Egress); n != 2 {
 		t.Fatalf("without the option the plain rule stays beside the CIDR: %d rules", n)
+	}
+}
+
+// 0.7.0: a reserved:world SOURCE with an address (an egress-gateway IP, a load balancer's client) is a fromCIDR rule —
+// what the receiver saw — not fromEntities: [world] (any external address), which 0.6.x wrote for every world source
+func TestBuildPolicies_WorldSourceIsFromCIDR(t *testing.T) {
+	ps, err := NewGenerator("").BuildPolicies(load(t, "ingress-world-cidr-to-receiver.json"))
+	if err != nil || len(ps) != 1 {
+		t.Fatalf("one policy expected: %d %v", len(ps), err)
+	}
+	r := ps[0].Spec.Ingress[0]
+	if len(r.FromCIDR) != 1 || string(r.FromCIDR[0]) != "172.18.255.170/32" || len(r.FromEntities) != 0 {
+		t.Fatalf("expected fromCIDR 172.18.255.170/32 and no entity, got %s", mustYAML(r))
+	}
+	if !strings.Contains(ps[0].Spec.Description, "from 172.18.255.170/32 on TCP/80") {
+		t.Fatalf("the description must name the address: %q", ps[0].Spec.Description)
+	}
+	if err := Validate(ps[0]); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -14,6 +14,35 @@ A CLI tool that generates CiliumNetworkPolicies from Hubble flow data. This tool
 
 > **Caution:** This project was created with the help of AI. While I have extensive experience with Kubernetes and Cilium, I do not have the Go programming expertise to write this tool from scratch. AI assistance made it possible to bring this idea to life and share it with the community. Please be careful when using this tool in production environments. Always review generated policies before applying them to your cluster.
 
+## The spec this build supports
+
+cf2cnp's policy types are Cilium's own (`github.com/cilium/cilium/pkg/policy/api`, pinned in `go.mod`), so every
+field of the CiliumNetworkPolicy spec exists, Cilium's `Sanitize()` — the checks the agent applies at admission —
+runs on every generated or merged policy (on a copy; the agent's own message comes back as a 400 or an exit 1), and
+the CRD of the same Cilium version is embedded from the module (`internal/crd`, copied by `go generate`, checked in
+CI). `cf2cnp version` prints both:
+
+```text
+cf2cnp 0.7.0
+policy spec: CiliumNetworkPolicy cilium.io/v2 as of Cilium v1.20.1 (types: github.com/cilium/cilium/pkg/policy/api v1.20.1; CRD embedded from the same module)
+```
+
+| cf2cnp | Cilium policy spec | Notes |
+|---|---|---|
+| 0.7.0 | v1.20.1 | Cilium's types; `fromCIDR` for external sources; the DNS resolver from the flows (Kubernetes / OpenShift); `validate`, `version` |
+| 0.5.0 – 0.6.3 | hand-written subset | 20 of the spec's 291 fields (`docs/CRD-SPEC-FORENSICS.md`) |
+
+A Cilium bump is a release: Renovate proposes it (`renovate.json`), the embedded CRD follows, and the golden tests
+(`internal/testdata/golden`, 14 real captures whose answers must stay byte for byte) say what changed. Output is
+rendered in a fixed, readable field order (`internal/render`), not the alphabetical order Kubernetes' YAML library
+would give.
+
+`cf2cnp validate <file>…` runs the same checks on any policy file, generated or hand-written:
+
+```bash
+cf2cnp validate policies/*.yaml       # exit code = documents refused; each refusal carries Cilium's own sentence
+```
+
 ## Binaries
 
 Every `v*` tag publishes `cf2cnp_<version>_<os>_<arch>.tar.gz` (linux and darwin, amd64 and arm64) with a
@@ -43,8 +72,8 @@ go build -o cf2cnp.exe ./cmd/cf2cnp
 ## Installation
 
 > **Fork note (ephico2real2/cf2cnp):** while the changes on this fork are pending upstream, the fork's chart is published as a
-> classic Helm repository at `https://ephico2real2.github.io/cf2cnp` (chart 0.6.3, appVersion 0.6.3) and its image as
-> `ghcr.io/ephico2real2/cf2cnp:0.6.3`. `helm repo add cf2cnp-fork https://ephico2real2.github.io/cf2cnp`.
+> classic Helm repository at `https://ephico2real2.github.io/cf2cnp` (chart 0.7.0, appVersion 0.7.0) and its image as
+> `ghcr.io/ephico2real2/cf2cnp:0.7.0`. `helm repo add cf2cnp-fork https://ephico2real2.github.io/cf2cnp`.
 
 The easiest way to use `CF2CNP` is to deploy it together with the [hubble-observer Helm chart](https://github.com/onzack/hubble-observer). This chart installs both the Hubble observer (to collect network flow data) and `CF2CNP` into your Kubernetes cluster, so you can generate policies directly from observed traffic. You can find installation instructions and configuration options for the Helm chart in the [hubble-observer Helm chart repository](https://github.com/onzack/hubble-observer).
 
@@ -82,6 +111,33 @@ twice changes nothing:
 
 ```bash
 cf2cnp merge --existing policies/shop.yaml --input flows.json          # in place
+cf2cnp merge --existing policies/shop.yaml --input flows/ -o new.yaml  # to another file
+```
+
+### The DNS resolver rule (toFQDNs, --dns-visibility)
+
+A `toFQDNs` rule needs the pod's lookups to pass through Cilium's DNS proxy, which the egress rule to the cluster's DNS
+with `rules.dns` turns on. Where that DNS is differs by platform, and Cilium's DNS guide says so for OpenShift
+("match the namespace openshift-dns instead of kube-system, remove the match on k8s-app=kube-dns, and change the port to
+5353"). cf2cnp derives the rule from the observed DNS flows when the input has them — the pods the workload asked, on
+the port and protocol it used — and takes a profile otherwise:
+
+```bash
+cf2cnp generate -i flows.ndjson -o out --dns-profile auto        # default: from the flows, else kubernetes
+cf2cnp generate -i flows.ndjson -o out --dns-profile openshift   # openshift-dns, 5353/ANY (no k8s-app label)
+cf2cnp generate -i flows.ndjson -o out --dns-resolver dns-system/app=coredns:5353/ANY   # any resolver
+```
+
+The API takes `?dnsProfile=` and `?dnsResolver=`; the page has a selector. `merge` takes the same flags.
+
+### External sources: fromCIDR
+
+An ingress flow whose source is outside the cluster (`reserved:world` with an address — an egress-gateway IP, a load
+balancer's client, an office range) becomes `fromCIDR: [<address>/32]`, what the receiver actually saw; without an
+address it stays `fromEntities: [world]`. Cilium refuses a rule that mixes `fromEndpoints` and `fromCIDR`, so cf2cnp
+keeps them in separate rules (and `Sanitize` would say so).
+
+```bash
 cf2cnp merge --existing policies/shop.yaml --input flows/ -o new.yaml  # to another file
 ```
 

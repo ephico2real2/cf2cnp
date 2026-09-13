@@ -332,3 +332,15 @@ func TestAuthToken_SchemeCaseAndLengths(t *testing.T) {
 		}
 	}
 }
+
+// 0.7.0: ?dnsProfile=openshift writes the OpenShift resolver rule; an unknown profile is a 400
+func TestGenerate_DNSProfile(t *testing.T) {
+	s := NewServer(8080, "")
+	rec := post(t, s, "/generate?dnsVisibility=true&dnsProfile=openshift", fixture(t, "egress-pos-to-world.json"), nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "io.kubernetes.pod.namespace: openshift-dns") || !strings.Contains(rec.Body.String(), "port: \"5353\"") {
+		t.Fatalf("openshift profile: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(t, s, "/generate?dnsProfile=nope", fixture(t, "egress-pos-to-world.json"), nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown profile must be a 400, got %d", rec.Code)
+	}
+}

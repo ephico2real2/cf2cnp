@@ -1,0 +1,23 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: shop-frontend
+  namespace: cf2cnp-lab27
+  labels:
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: shop
+spec:
+  description: 'Allow ingress to shop/frontend in cf2cnp-lab27: from pos on TCP/80'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: frontend
+      app.kubernetes.io/name: shop
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: pos
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP

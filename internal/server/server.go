@@ -527,7 +527,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
         <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
         <label><input id="l7" type="checkbox"> Layer-7 rules <span class="muted">(HTTP method + path, DNS names, from flows that carry them; the port then goes through the proxy)</span></label>
-        <label><input id="dnsVisibility" type="checkbox"> DNS visibility <span class="muted">(world traffic without names: add the kube-dns DNS rule so the next flows carry names)</span></label>
+        <label><input id="dnsVisibility" type="checkbox"> DNS visibility <span class="muted">(world traffic without names: add the DNS resolver rule so the next flows carry names)</span></label>
+        <label for="dnsProfile">DNS resolver <span class="muted">(the rule toFQDNs and DNS visibility write: auto = from the observed DNS flows, else kube-system/kube-dns:53; openshift = openshift-dns:5353)</span></label>
+        <select id="dnsProfile"><option value="auto">auto</option><option value="kubernetes">kubernetes</option><option value="openshift">openshift</option></select>
         <label for="token">Access token <span class="muted">(only when the server requires one; kept in this tab's sessionStorage, never in the page)</span></label>
         <input id="token" type="password" placeholder="Bearer token" spellcheck="false" oninput="try { sessionStorage.setItem('cf2cnp-token', this.value); } catch (e) {}">
     </div>
@@ -638,6 +640,7 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             const params = []; if (name) params.push('name=' + encodeURIComponent(name));
             if (document.getElementById('l7').checked) params.push('l7=true');
             if (document.getElementById('dnsVisibility').checked) params.push('dnsVisibility=true');
+            const dnsProfile = document.getElementById('dnsProfile').value; if (dnsProfile && dnsProfile !== 'auto') params.push('dnsProfile=' + dnsProfile);
             for (const p of excludedPeers()) params.push('exclude=' + encodeURIComponent(p));
             const url = '/generate' + (params.length ? '?' + params.join('&') : '');
             try {
@@ -767,6 +770,18 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("l7") == "true" {
 		generator = generator.WithL7() // E2: opt-in layer-7 rules
+	}
+	if p := r.URL.Query().Get("dnsProfile"); p != "" {
+		if _, err := generator.WithDNSProfile(p); err != nil { // 0.7.0: auto | kubernetes | openshift
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if spec := r.URL.Query().Get("dnsResolver"); spec != "" {
+		if _, err := generator.WithDNSResolver(spec); err != nil { // 0.7.0: <namespace>[/<label>=<value>]:<port>[/<proto>]
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if r.URL.Query().Get("dnsVisibility") == "true" {
 		generator = generator.WithDNSVisibility() // E3: opt-in DNS visibility companion rule

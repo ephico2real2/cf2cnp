@@ -1,0 +1,23 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: pos
+  namespace: cf2cnp-lab
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: pos
+spec:
+  description: 'Allow egress from pos in cf2cnp-lab: to 104.20.23.154/32 on TCP/443'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pos
+  egress:
+    - toCIDR:
+        - 104.20.23.154/32
+    # To allow all traffic to world instead of specific IPs, replace toCIDR with:
+    # - toEntities:
+    #     - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

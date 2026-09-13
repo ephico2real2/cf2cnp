@@ -21,6 +21,7 @@ type AggregatedFlow struct {
 	DestCluster         string            // ClusterMesh: the destination's cluster (E1)
 	DestFQDNs           []string          // Destination FQDNs for world traffic
 	DestIPs             []string          // Destination IPs for CIDR-based rules
+	SourceIPs           []string          // Source addresses of a reserved:world source (fromCIDR, 0.7.0)
 	DestEntity          string            // Reserved entity (kube-apiserver, host, world, etc.)
 	Ports               []PortInfo        // Aggregated ports
 	IsWorldTraffic      bool              // True if destination is "world"
@@ -67,12 +68,18 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 			if f.DestIP != "" && !containsString(existing.DestIPs, f.DestIP) {
 				existing.DestIPs = append(existing.DestIPs, f.DestIP)
 			}
+			if f.SourceIP != "" && !containsString(existing.SourceIPs, f.SourceIP) {
+				existing.SourceIPs = append(existing.SourceIPs, f.SourceIP)
+			}
 			addL7(existing, f)
 		} else {
 			// Create new aggregated flow
-			var destIPs []string
+			var destIPs, sourceIPs []string
 			if f.DestIP != "" {
 				destIPs = []string{f.DestIP}
+			}
+			if f.SourceIP != "" {
+				sourceIPs = []string{f.SourceIP}
 			}
 			aggregated := &AggregatedFlow{
 				Direction:           f.Direction,
@@ -86,6 +93,7 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 				DestCluster:         f.DestCluster,
 				DestFQDNs:           append([]string{}, f.DestFQDNs...),
 				DestIPs:             destIPs,
+				SourceIPs:           sourceIPs,
 				DestEntity:          f.DestEntity,
 				Ports:               []PortInfo{{Port: f.Port, Protocol: f.Protocol}},
 				IsWorldTraffic:      f.IsWorldTraffic,

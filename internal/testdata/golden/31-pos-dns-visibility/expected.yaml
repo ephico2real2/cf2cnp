@@ -1,0 +1,43 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: pos
+  namespace: cf2cnp-lab
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: pos
+spec:
+  description: 'Allow egress from pos in cf2cnp-lab: to shop on TCP/80; to 104.20.23.154/32 on TCP/443; to kube-dns in kube-system on UDP/53 (DNS *)'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pos
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: shop
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+    - toCIDR:
+        - 104.20.23.154/32
+    # To allow all traffic to world instead of specific IPs, replace toCIDR with:
+    # - toEntities:
+    #     - world
+    # The DNS rule below turns the DNS proxy on for these endpoints: once flows carry destination_names,
+    # regenerate to get a toFQDNs rule instead of this CIDR.
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+          rules:
+            dns:
+              - matchPattern: '*'

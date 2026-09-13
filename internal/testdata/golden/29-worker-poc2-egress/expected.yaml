@@ -1,0 +1,33 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: worker-batch
+  namespace: mesh-lab
+  labels:
+    app.kubernetes.io/component: batch
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: worker
+spec:
+  description: 'Allow egress from worker/batch in mesh-lab: to kube-dns in kube-system on UDP/53; to cache/server in cluster poc1 on TCP/6379'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: batch
+      app.kubernetes.io/name: worker
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: server
+            app.kubernetes.io/name: cache
+            io.cilium.k8s.policy.cluster: poc1
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP

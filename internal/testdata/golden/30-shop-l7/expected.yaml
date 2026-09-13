@@ -1,0 +1,58 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: shop-backend
+  namespace: cf2cnp-lab30
+  labels:
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: shop
+spec:
+  description: 'Allow ingress to shop/backend in cf2cnp-lab30: from shop/frontend on TCP/80 (HTTP GET /api/orders)'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: backend
+      app.kubernetes.io/name: shop
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: frontend
+            app.kubernetes.io/name: shop
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: ^/api/orders(\?.*)?$
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: shop-frontend
+  namespace: cf2cnp-lab30
+  labels:
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: shop
+spec:
+  description: 'Allow ingress to shop/frontend in cf2cnp-lab30: from pos on TCP/80 (HTTP GET /, GET /checkout)'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: frontend
+      app.kubernetes.io/name: shop
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: pos
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: ^/(\?.*)?$
+              - method: GET
+                path: ^/checkout(\?.*)?$

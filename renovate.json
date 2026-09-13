@@ -1,0 +1,19 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "postUpdateOptions": ["gomodTidy"],
+  "packageRules": [
+    {
+      "description": "The Cilium module IS the policy spec cf2cnp supports: a bump is a release. The PR must re-run `go generate ./internal/crd` (the embedded CRD follows the module) and the golden tests.",
+      "matchDatasources": ["go"],
+      "matchPackageNames": ["github.com/cilium/cilium"],
+      "groupName": "cilium policy API (the supported CiliumNetworkPolicy spec)",
+      "labels": ["spec-bump"],
+      "postUpgradeTasks": {
+        "commands": ["go generate ./internal/crd"],
+        "fileFilters": ["internal/crd/**"],
+        "executionMode": "update"
+      }
+    }
+  ]
+}

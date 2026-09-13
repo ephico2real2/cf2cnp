@@ -23,8 +23,8 @@ import (
 func Describe(p *CiliumNetworkPolicy) string {
 	// the subject is named the way the peers are (name/component/instance from the selector), so the sentence reads
 	// "shop/frontend … from shop/backend"; a policy without a selector falls back to its object name
-	subject := describeSelector(p.Spec.EndpointSelector.MatchLabels)
-	if len(p.Spec.EndpointSelector.MatchLabels) == 0 {
+	subject := describeSelector(MatchLabelsOf(p.Spec.EndpointSelector))
+	if len(MatchLabelsOf(p.Spec.EndpointSelector)) == 0 {
 		subject = p.Metadata.Name
 	}
 	subject += " in " + p.Metadata.Namespace
@@ -32,7 +32,7 @@ func Describe(p *CiliumNetworkPolicy) string {
 	if n := len(p.Spec.Ingress); n > 0 {
 		items := make([]string, 0, n)
 		for _, r := range p.Spec.Ingress {
-			items = append(items, "from "+peerList(r.FromEndpoints, r.FromEntities, nil, nil)+portList(r.ToPorts))
+			items = append(items, "from "+peerList(r.FromEndpoints, r.FromEntities, r.FromCIDR, nil)+portList(r.ToPorts))
 		}
 		parts = append(parts, "ingress to "+subject+": "+joinRules(items))
 	}
@@ -59,15 +59,21 @@ func joinRules(items []string) string {
 }
 
 // peerList names every peer of one rule: endpoints by their selector, entities, CIDRs and FQDNs as written
-func peerList(endpoints []LabelSelector, entities, cidrs []string, fqdns []FQDNSelector) string {
+func peerList(endpoints []EndpointSelector, entities EntitySlice, cidrs CIDRSlice, fqdns []FQDNSelector) string {
 	var peers []string
 	for _, e := range endpoints {
-		peers = append(peers, describeSelector(e.MatchLabels))
+		peers = append(peers, describeSelector(MatchLabelsOf(e)))
 	}
 	if len(entities) > 0 {
-		peers = append(peers, "entities "+strings.Join(entities, ", "))
+		names := make([]string, len(entities))
+		for i, e := range entities {
+			names[i] = string(e)
+		}
+		peers = append(peers, "entities "+strings.Join(names, ", "))
 	}
-	peers = append(peers, cidrs...)
+	for _, c := range cidrs {
+		peers = append(peers, string(c))
+	}
 	for _, f := range fqdns {
 		if f.MatchName != "" {
 			peers = append(peers, f.MatchName)
@@ -105,6 +111,9 @@ func describeSelector(labels map[string]string) string {
 	}
 	out := strings.Join(who, "/")
 	if ns, ok := labels[flow.GetNamespaceLabel()]; ok {
+		if out == "" {
+			out = "endpoints"
+		}
 		out += " in " + ns
 		used[flow.GetNamespaceLabel()] = true
 	}
@@ -130,11 +139,11 @@ func describeSelector(labels map[string]string) string {
 
 // portList renders " on TCP/80, UDP/53" and the L7 rules a port carries: HTTP as "GET /path" (the anchors and the
 // optional-query suffix the generator adds are stripped for reading), DNS as the names or patterns
-func portList(rules []PortRule) string {
+func portList(rules PortRules) string {
 	var ports []string
 	for _, pr := range rules {
 		for _, p := range pr.Ports {
-			s := p.Protocol + "/" + p.Port
+			s := string(p.Protocol) + "/" + p.Port
 			if p.Protocol == "" {
 				s = p.Port
 			}

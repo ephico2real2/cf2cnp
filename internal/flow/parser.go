@@ -158,6 +158,12 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 	parsed.DestEntity = getReservedEntity(flow.Destination.Labels)
 	parsed.IsDestEntityTraffic = parsed.DestEntity != ""
 
+	// A world SOURCE is an address too (an egress-gateway IP, a load balancer's client, an office range): keep it, so
+	// the ingress rule can be a fromCIDR instead of the whole world (0.7.0; the 0.6.x rule was fromEntities: [world])
+	if isWorldTraffic(flow.Source.Labels) {
+		parsed.SourceIP = flow.IP.Source
+	}
+
 	// Check if destination is "world" (external traffic)
 	parsed.IsWorldTraffic = isWorldTraffic(flow.Destination.Labels)
 	if parsed.IsWorldTraffic {

@@ -6,12 +6,19 @@ import (
 	"path/filepath"
 	"strings"
 
+	"runtime/debug"
+
 	"github.com/hubble-policy-gen/internal/aggregator"
+	"github.com/hubble-policy-gen/internal/crd"
 	"github.com/hubble-policy-gen/internal/flow"
 	"github.com/hubble-policy-gen/internal/policy"
 	"github.com/hubble-policy-gen/internal/server"
 	"github.com/spf13/cobra"
+	sigsyaml "sigs.k8s.io/yaml"
 )
+
+// version is set at build time: -ldflags "-X main.version=<tag>" (the release workflow and the Dockerfile do)
+var version = "dev"
 
 var (
 	inputDir       string
@@ -25,12 +32,15 @@ var (
 	yoloNamespace  string
 	allowedOrigins string
 	authToken      string
+	dnsProfile     string
+	dnsResolver    string
 )
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "cf2cnp",
-		Short: "CF2CNP - Cilium Flow to CiliumNetworkPolicy",
+		SilenceUsage: true, // a runtime error is not a usage error: print the message, not the flags
+		Use:          "cf2cnp",
+		Short:        "CF2CNP - Cilium Flow to CiliumNetworkPolicy",
 		Long: `CF2CNP (Cilium Flow to CiliumNetworkPolicy) is a CLI tool that reads Hubble flow JSON files
 and generates CiliumNetworkPolicy YAML files based on the observed traffic.
 
@@ -52,10 +62,12 @@ or use the 'serve' command to run as an HTTP server.`,
 		Long:  "Read Hubble flow JSON files from an input directory and generate CiliumNetworkPolicy YAML files.",
 		RunE:  runGenerate,
 	}
-	generateCmd.Flags().StringVarP(&inputDir, "input", "i", "", "Input directory containing Hubble flow JSON files (required)")
+	generateCmd.Flags().StringVarP(&inputDir, "input", "i", "", "A Hubble flow file (one flow, an array, or one per line) or a directory of such files (required)")
 	generateCmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory for generated CiliumNetworkPolicy YAML files (required)")
 	generateCmd.Flags().BoolVar(&l7, "l7", false, "Emit layer-7 rules (HTTP method+path, DNS names) from the flows' l7 records; the port then goes through the proxy")
 	generateCmd.Flags().BoolVar(&dnsVisibility, "dns-visibility", false, "For world traffic without DNS names, add the kube-dns L7 DNS rule so the next flows carry names (toFQDNs on the next run)")
+	generateCmd.Flags().StringVar(&dnsProfile, "dns-profile", "auto", "The DNS resolver rule toFQDNs and --dns-visibility write: auto (from the observed DNS flows, else kubernetes), kubernetes (kube-system, k8s-app=kube-dns, 53/UDP), openshift (openshift-dns, 5353/ANY)")
+	generateCmd.Flags().StringVar(&dnsResolver, "dns-resolver", "", "The DNS resolver explicitly, over --dns-profile: <namespace>[/<label>=<value>]:<port>[/<protocol>], e.g. openshift-dns:5353/ANY")
 	generateCmd.MarkFlagRequired("input")
 	generateCmd.MarkFlagRequired("output")
 
@@ -120,12 +132,36 @@ are not already there. Running it twice changes nothing. The existing policy mus
 	mergeCmd.Flags().StringVar(&existingFile, "existing", "", "Existing CiliumNetworkPolicy YAML (required)")
 	mergeCmd.Flags().StringVarP(&inputDir, "input", "i", "", "Flow file (one flow, an array, or one per line) or a directory of such files (required)")
 	mergeCmd.Flags().StringVarP(&outputFile, "output", "o", "", "Where to write the merged policy (default: --existing, in place)")
+	mergeCmd.Flags().StringVar(&dnsProfile, "dns-profile", "auto", "The DNS resolver rule (see generate --dns-profile)")
+	mergeCmd.Flags().StringVar(&dnsResolver, "dns-resolver", "", "The DNS resolver explicitly (see generate --dns-resolver)")
 	mergeCmd.MarkFlagRequired("existing")
 	mergeCmd.MarkFlagRequired("input")
+
+	// Version: the tool's own version and the policy spec it supports — the Cilium module its types come from
+	// and the CRD embedded from it. A release states both; a Cilium bump is a release.
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the version and the CiliumNetworkPolicy spec this build supports",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("cf2cnp %s\n", version)
+			fmt.Printf("policy spec: CiliumNetworkPolicy cilium.io/v2 as of Cilium %s (types: github.com/cilium/cilium/pkg/policy/api %s; CRD embedded from the same module)\n", crd.Version(), ciliumModuleVersion())
+		},
+	}
+
+	// Validate: the checks the agent applies at admission (Cilium's Rule.Sanitize), on any policy file — generated
+	// or hand-written. The CRD schema itself is checked in CI against the embedded copy (see .github/workflows/ci.yml).
+	validateCmd := &cobra.Command{
+		Use:   "validate <file>...",
+		Short: "Validate CiliumNetworkPolicy YAML files with Cilium's own rule checks",
+		Args:  cobra.MinimumNArgs(1),
+		RunE:  runValidate,
+	}
 
 	rootCmd.AddCommand(generateCmd)
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(validateCmd)
+	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(yoloCmd)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -148,15 +184,10 @@ func runYoloNs(cmd *cobra.Command, args []string) error {
 }
 
 func runGenerate(cmd *cobra.Command, args []string) error {
-	// Validate input directory exists
-	if _, err := os.Stat(inputDir); os.IsNotExist(err) {
-		return fmt.Errorf("input directory does not exist: %s", inputDir)
-	}
-
 	fmt.Printf("Reading flows from: %s\n", inputDir)
 
-	// Parse all flow files from input directory
-	flows, err := flow.ParseFlowsFromDirectory(inputDir)
+	// A file or a directory (0.7.0: the directory-only form left the policy-PR template's first run without a policy)
+	flows, err := readFlows(inputDir)
 	if err != nil {
 		return fmt.Errorf("failed to parse flows: %w", err)
 	}
@@ -174,6 +205,9 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	// Generate policies
 	generator := policy.NewGenerator(outputDir)
+	if err := applyDNSFlags(generator); err != nil {
+		return err
+	}
 	if l7 {
 		generator = generator.WithL7()
 	}
@@ -224,7 +258,11 @@ func runMerge(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	policies, err := policy.NewGenerator("").BuildPolicies(aggregator.AggregateFlows(flows))
+	generator := policy.NewGenerator("")
+	if err := applyDNSFlags(generator); err != nil {
+		return err
+	}
+	policies, err := generator.BuildPolicies(aggregator.AggregateFlows(flows))
 	if err != nil {
 		return err
 	}
@@ -246,5 +284,68 @@ func runMerge(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("%d rule(s) added → %s\n", added, target)
+	return nil
+}
+
+// ciliumModuleVersion is the version of github.com/cilium/cilium linked into this binary (the supported spec)
+func ciliumModuleVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, d := range bi.Deps {
+			if d.Path == "github.com/cilium/cilium" {
+				return d.Version
+			}
+		}
+	}
+	return "unknown"
+}
+
+// runValidate parses every document of every file as a CiliumNetworkPolicy and runs policy.Validate on it; the
+// exit code is the number of documents refused, and each refusal carries the agent's own sentence.
+func runValidate(cmd *cobra.Command, args []string) error {
+	failed := 0
+	for _, path := range args {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for i, doc := range strings.Split(string(b), "\n---") {
+			if strings.TrimSpace(doc) == "" {
+				continue
+			}
+			var p policy.CiliumNetworkPolicy
+			if err := sigsyaml.Unmarshal([]byte(doc), &p); err != nil {
+				fmt.Printf("%s (document %d): cannot parse: %v\n", path, i+1, err)
+				failed++
+				continue
+			}
+			if p.Kind != "CiliumNetworkPolicy" && p.Kind != "CiliumClusterwideNetworkPolicy" {
+				fmt.Printf("%s (document %d): kind %q is not a Cilium policy\n", path, i+1, p.Kind)
+				failed++
+				continue
+			}
+			if err := policy.Validate(&p); err != nil {
+				fmt.Printf("%s (document %d): %v\n", path, i+1, err)
+				failed++
+				continue
+			}
+			fmt.Printf("%s (document %d): %s/%s ok\n", path, i+1, p.Metadata.Namespace, p.Metadata.Name)
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d document(s) refused", failed)
+	}
+	return nil
+}
+
+// applyDNSFlags sets the DNS resolver options shared by generate and merge (0.7.0, dns.go)
+func applyDNSFlags(g *policy.Generator) error {
+	if _, err := g.WithDNSProfile(dnsProfile); err != nil {
+		return err
+	}
+	if dnsResolver != "" {
+		if _, err := g.WithDNSResolver(dnsResolver); err != nil {
+			return err
+		}
+	}
 	return nil
 }

@@ -127,6 +127,7 @@ type ParsedFlow struct {
 	DestCluster         string            // flow.destination.cluster_name (E1)
 	DestFQDNs           []string          // Destination FQDNs for world traffic
 	DestIP              string            // Destination IP for CIDR-based rules
+	SourceIP            string            // 0.7.0: the source's address when the source is reserved:world (fromCIDR)
 	DestEntity          string            // Reserved entity (kube-apiserver, host, world, etc.)
 	Protocol            string            // TCP or UDP
 	Port                int               // Destination port

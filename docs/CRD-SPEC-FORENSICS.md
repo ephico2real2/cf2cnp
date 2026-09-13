@@ -40,8 +40,8 @@ never generated; **n/a** = not applicable to a namespaced policy.
 |---|---|---|
 | `fromEndpoints[].matchLabels` | yes (namespace and cluster labels included) | flows |
 | `fromEndpoints[].matchExpressions` | **no** | pass-through |
-| `fromEntities[]` | yes, `host` and `remote-node` only (`world` and `kube-apiserver` sources are mishandled: see §2.5) | flows |
-| `fromCIDR[]` | **no** — the finding | **flows**: a `reserved:world` source with an address (an egress-gateway IP, a load-balancer client, an office range) |
+| `fromEntities[]` | yes (`host`+`remote-node` paired; any other entity, `world` included, written as itself — §2.5) | flows |
+| `fromCIDR[]` | **no** — the finding (0.7.0: yes) | **flows**: a `reserved:world` source with an address (an egress-gateway IP, a load-balancer client, an office range) |
 | `fromCIDRSet[].{cidr,except,cidrGroupRef,cidrGroupSelector}` | **no** | intent (`except`), pass-through |
 | `fromRequires[]` | **no** | intent |
 | `fromGroups[].aws` | **no** | n/a here |
@@ -82,10 +82,12 @@ model, but which the *generator* cannot emit.
 
 ### 2.5 Two mis-modellings found while reading the parser
 
-- `reservedEntities` maps `reserved:world` and `reserved:kube-apiserver` to entities, but `generateEntityIngressRules`
-  writes `fromEntities` only for `host` and `remote-node`; a world **source** therefore produces no peer at all in the
-  ingress rule (an ingress rule with `toPorts` and no `from*` is "allow from anyone on this port" — wider than
-  observed). This is the finding, seen from the code.
+- **Retracted on implementation (2026-09-13):** an earlier revision of this note said a world source "produces no
+  peer at all". Re-reading `generateEntityIngressRules` with the code open: its `else` branch writes
+  `fromEntities: [<entity>]` for every entity that is not `host`/`remote-node`, so a world source produced
+  `fromEntities: [world]` — any external address, wider than the one address observed, but not an empty peer list.
+  The finding stands as first stated in the plan (`fromEntities` where `fromCIDR` was wanted); the "no peer" reading
+  was wrong and is withdrawn.
 - `Port.Protocol` is written as observed (`TCP`/`UDP`); nothing upper-cases a lower-case value. The CRD's enum is
   upper-case only (measured below: `"tcp"` is rejected by the schema).
 

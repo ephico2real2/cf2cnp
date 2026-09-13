@@ -1,60 +1,29 @@
 package policy
 
 import (
-	"bytes"
 	"fmt"
 
-	"gopkg.in/yaml.v3"
+	"github.com/hubble-policy-gen/internal/render"
 )
 
 // YOLONamespacePolicy generates a CiliumNetworkPolicy that allows all traffic
 // within the same namespace. This is an easter egg policy - use with caution!
 func YOLONamespacePolicy(namespace string) *CiliumNetworkPolicy {
-	return &CiliumNetworkPolicy{
-		APIVersion: "cilium.io/v2",
-		Kind:       "CiliumNetworkPolicy",
-		Metadata: Metadata{
-			Name:      "yolo-allow-all-in-namespace",
-			Namespace: namespace,
-		},
-		Spec: Spec{
-			Description: fmt.Sprintf("YOLO! Allow all traffic within the %s namespace.", namespace),
-			EndpointSelector: LabelSelector{
-				MatchLabels: map[string]string{},
-			},
-			Ingress: []IngressRule{
-				{
-					FromEndpoints: []LabelSelector{
-						{MatchLabels: map[string]string{}},
-					},
-				},
-			},
-			Egress: []EgressRule{
-				{
-					ToEndpoints: []LabelSelector{
-						{MatchLabels: map[string]string{}},
-					},
-				},
-			},
-		},
-	}
+	p := NewPolicy()
+	p.Metadata.Name = "yolo-allow-all-in-namespace"
+	p.Metadata.Namespace = namespace
+	p.Spec.Description = fmt.Sprintf("YOLO! Allow all traffic within the %s namespace.", namespace)
+	p.Spec.EndpointSelector = Selector(map[string]string{})
+	p.Spec.Ingress = []IngressRule{{IngressCommonRule: IngressCommonRule{FromEndpoints: []EndpointSelector{Selector(map[string]string{})}}}}
+	p.Spec.Egress = []EgressRule{{EgressCommonRule: EgressCommonRule{ToEndpoints: []EndpointSelector{Selector(map[string]string{})}}}}
+	return p
 }
 
 // YOLONamespacePolicyYAML generates the YOLO policy as YAML bytes
 func YOLONamespacePolicyYAML(namespace string) ([]byte, error) {
-	policy := YOLONamespacePolicy(namespace)
-
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-
-	if err := encoder.Encode(policy); err != nil {
+	b, err := render.Document(YOLONamespacePolicy(namespace))
+	if err != nil {
 		return nil, fmt.Errorf("failed to encode YOLO policy to YAML: %w", err)
 	}
-
-	if err := encoder.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close YAML encoder: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return b, nil
 }

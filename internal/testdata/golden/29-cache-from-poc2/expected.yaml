@@ -1,0 +1,25 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: cache-server
+  namespace: mesh-lab
+  labels:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: cache
+spec:
+  description: 'Allow ingress to cache/server in mesh-lab: from worker/batch in cluster poc2 on TCP/6379'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: server
+      app.kubernetes.io/name: cache
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: batch
+            app.kubernetes.io/name: worker
+            io.cilium.k8s.policy.cluster: poc2
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP

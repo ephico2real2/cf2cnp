@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -11,7 +11,8 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o cf2cnp ./cmd/cf2cnp
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=${VERSION}" -o cf2cnp ./cmd/cf2cnp
 
 # Runtime stage - using distroless for minimal attack surface
 FROM gcr.io/distroless/static-debian12:nonroot

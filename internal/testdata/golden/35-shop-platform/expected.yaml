@@ -1,0 +1,175 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: api-gateway
+  namespace: shop-edge
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: api-gateway
+spec:
+  description: 'Allow ingress to api-gateway in shop-edge: from shopper in shop-clients on TCP/80'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: api-gateway
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: shopper
+            io.kubernetes.pod.namespace: shop-clients
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: catalog
+  namespace: shop-core
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: catalog
+spec:
+  description: 'Allow ingress to catalog in shop-core: from orders on TCP/80; from api-gateway in shop-edge on TCP/80; from merchant in shop-merchant on TCP/80; from reviews in shop-reviews on TCP/80'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: catalog
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: orders
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: api-gateway
+            io.kubernetes.pod.namespace: shop-edge
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: merchant
+            io.kubernetes.pod.namespace: shop-merchant
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: reviews
+            io.kubernetes.pod.namespace: shop-reviews
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: payment-gateway
+  namespace: shop-payments
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: payment-gateway
+spec:
+  description: 'Allow ingress to payment-gateway in shop-payments: from orders in shop-core on TCP/80; from api-gateway in shop-edge on TCP/80'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: payment-gateway
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: orders
+            io.kubernetes.pod.namespace: shop-core
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: api-gateway
+            io.kubernetes.pod.namespace: shop-edge
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orders
+  namespace: shop-core
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: orders
+spec:
+  description: 'Allow ingress to orders in shop-core: from api-gateway in shop-edge on TCP/80'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: orders
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: api-gateway
+            io.kubernetes.pod.namespace: shop-edge
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: reviews
+  namespace: shop-reviews
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: reviews
+spec:
+  description: 'Allow ingress to reviews in shop-reviews: from api-gateway in shop-edge on TCP/80; from ratings on TCP/80'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: reviews
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: api-gateway
+            io.kubernetes.pod.namespace: shop-edge
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: ratings
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: merchant
+  namespace: shop-merchant
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: merchant
+spec:
+  description: 'Allow ingress to merchant in shop-merchant: from payment-gateway in shop-payments on TCP/80'
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: merchant
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: payment-gateway
+            io.kubernetes.pod.namespace: shop-payments
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP

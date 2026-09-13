@@ -25,7 +25,7 @@ jobs:
           mkdir -p dist
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             os="${target%/*}"; arch="${target#*/}"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "dist/cf2cnp" ./cmd/cf2cnp
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME#v}" -o "dist/cf2cnp" ./cmd/cf2cnp
             tar -C dist -czf "dist/cf2cnp_${VERSION}_${os}_${arch}.tar.gz" cf2cnp
             rm dist/cf2cnp
           done

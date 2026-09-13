@@ -1,0 +1,56 @@
+# CI — the checks a change must pass before it is released. Three layers guard the spec:
+#   1. `go test ./...`: unit tests, and TestGolden — the /generate answer for 14 real Hubble captures must be byte for
+#      byte what 0.6.3 answered (a deliberate output change regenerates the fixtures in the same commit).
+#   2. Cilium's own Sanitize() runs inside those tests (internal/policy.Validate) — the agent's admission checks.
+#   3. The CRD schema of the pinned Cilium module: the embedded copy must be identical to the module's, and every
+#      golden output must validate against it offline (kubectl-validate --local-crds, the same mechanism the PoC's
+#      policy-PR template uses).
+# And one line that must never appear: the Kubernetes client machinery in the dependency graph (18 MB → 94 MB).
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet and test (unit, golden, Sanitize)
+        run: |
+          go vet ./...
+          go test ./... -count=1
+      - name: The embedded CRD is the pinned module's, byte for byte
+        run: |
+          set -eu
+          dir=$(go list -m -f '{{.Dir}}' github.com/cilium/cilium)
+          cmp internal/crd/ciliumnetworkpolicies.yaml "$dir/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
+          test "$(cat internal/crd/VERSION)" = "$(go list -m -f '{{.Version}}' github.com/cilium/cilium)"
+          echo "CRD: cilium $(cat internal/crd/VERSION)"
+      - name: Every golden output validates against the CRD schema (offline)
+        run: |
+          set -eu
+          crds=$(mktemp -d); cp internal/crd/ciliumnetworkpolicies.yaml "$crds/"
+          for f in internal/testdata/golden/*/expected.yaml; do
+            go run sigs.k8s.io/kubectl-validate@v0.0.4 --local-crds "$crds" "$f"
+          done
+      - name: The Kubernetes client machinery stays out of the binary
+        run: |
+          set -eu
+          if go list -deps ./cmd/cf2cnp | grep -E '^k8s.io/client-go|^github.com/cilium/cilium/pkg/k8s/client'; then
+            echo "the client packages are imported — the binary would grow from 18 MB to 94 MB (docs/CRD-SPEC-FORENSICS.md)"; exit 1
+          fi
+          echo "dependency graph clean"
+      - name: The binary names the spec it supports
+        run: |
+          go build -ldflags="-X main.version=ci" -o /tmp/cf2cnp ./cmd/cf2cnp
+          /tmp/cf2cnp version
+          /tmp/cf2cnp validate internal/testdata/golden/*/expected.yaml

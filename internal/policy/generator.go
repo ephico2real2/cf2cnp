@@ -10,9 +10,13 @@ import (
 	"sort"
 	"strings"
 
+	"encoding/json"
+
 	"github.com/hubble-policy-gen/internal/aggregator"
 	"github.com/hubble-policy-gen/internal/flow"
-	"gopkg.in/yaml.v3"
+	"github.com/hubble-policy-gen/internal/render"
+
+	"github.com/cilium/cilium/pkg/policy/api"
 )
 
 // ClusterLabel is the label Cilium puts on every endpoint of a ClusterMesh member and matches in
@@ -39,8 +43,11 @@ var ErrNameNeedsOnePolicy = errors.New("a policy name can only be set when the f
 type Generator struct {
 	outputDir     string
 	nameOverride  string
-	l7            bool // E2: emit HTTP/DNS rules from the flows' l7 records
-	dnsVisibility bool // E3: add the kube-dns L7 DNS rule to world policies that have no names
+	l7            bool         // E2: emit HTTP/DNS rules from the flows' l7 records
+	dnsVisibility bool         // E3: add the DNS resolver's L7 DNS rule to world policies that have no names
+	dnsProfile    string       // 0.7.0: auto (from the flows), kubernetes or openshift
+	dnsResolver   *DNSResolver // 0.7.0: an explicit --dns-resolver, over the profile
+	resolver      DNSResolver  // the resolver of the current BuildPolicies run
 }
 
 // WithDNSVisibility adds the kube-dns L7 DNS rule to a world policy that has no names, so that the DNS
@@ -50,18 +57,6 @@ type Generator struct {
 func (g *Generator) WithDNSVisibility() *Generator {
 	g.dnsVisibility = true
 	return g
-}
-
-// dnsVisibilityRule is the egress rule that turns the DNS proxy on for the selected endpoints — the same
-// rule every toFQDNs policy carries, factored out so both paths write one thing.
-func dnsVisibilityRule() EgressRule {
-	return EgressRule{
-		ToEndpoints: []LabelSelector{{MatchLabels: map[string]string{flow.GetNamespaceLabel(): "kube-system", "k8s-app": "kube-dns"}}},
-		ToPorts: []PortRule{{
-			Ports: []Port{{Port: "53", Protocol: "UDP"}},
-			Rules: &L7Rules{DNS: []DNSRule{{MatchPattern: "*"}}},
-		}},
-	}
 }
 
 // WithL7 makes the generator write layer-7 rules (HTTP method+path, DNS names) where the flows carry
@@ -76,12 +71,12 @@ func (g *Generator) WithL7() *Generator {
 // one port rule with every port, as before. With them, every port that carries L7 records gets its own
 // port rule with a rules: block, and the ports without stay together — an HTTP rule seen on 8080 must not
 // restrict 5432 of the same peer pair (review finding). Cilium's L7Rules is a union: one protocol per port.
-func (g *Generator) portRules(f *aggregator.AggregatedFlow) []PortRule {
+func (g *Generator) portRules(f *aggregator.AggregatedFlow) PortRules {
 	if !g.l7 {
-		return []PortRule{{Ports: convertPorts(f.Ports)}}
+		return PortRules{{Ports: convertPorts(f.Ports)}}
 	}
 	var plain []aggregator.PortInfo
-	var rules []PortRule
+	var rules PortRules
 	for _, p := range f.Ports {
 		r := l7RulesFor(p)
 		if r == nil {
@@ -91,7 +86,7 @@ func (g *Generator) portRules(f *aggregator.AggregatedFlow) []PortRule {
 		rules = append(rules, PortRule{Ports: convertPorts([]aggregator.PortInfo{p}), Rules: r})
 	}
 	if len(plain) > 0 {
-		rules = append([]PortRule{{Ports: convertPorts(plain)}}, rules...)
+		rules = append(PortRules{{Ports: convertPorts(plain)}}, rules...)
 	}
 	return rules
 }
@@ -141,6 +136,8 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 		return nil, ErrReplyFlow
 	}
 
+	g.resolver = g.resolveDNS(flows) // the DNS rule of this run: from the flows, or the profile (dns.go)
+
 	var policies []*CiliumNetworkPolicy
 	for _, f := range flows {
 		if f.IsReply {
@@ -148,7 +145,12 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 		}
 		policies = append(policies, g.GeneratePolicy(f))
 	}
-	policies = MergePolicies(policies)
+	policies = mergePolicies(policies, g.dnsRule())
+	for _, p := range policies {
+		if err := Validate(p); err != nil {
+			return nil, err
+		}
+	}
 
 	if g.nameOverride != "" {
 		if len(policies) != 1 {
@@ -159,16 +161,34 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 	return policies, nil
 }
 
+// Validate runs Cilium's own admission-time checks (api.Rule.Sanitize) on the policy and reports the agent's error
+// text — "combining FromEndpoints and FromCIDR is not supported yet", an unparsable CIDR, an invalid selector. It works
+// on a deep copy: Sanitize also normalises what it checks (selector keys get Cilium's label-source prefix, the protocol
+// is upper-cased, enableDefaultDeny is filled), and none of that belongs in the document a user reads
+// (docs/CRD-SPEC-FORENSICS.md §3, probes 2 and 3).
+func Validate(p *CiliumNetworkPolicy) error {
+	check := p.Spec.DeepCopy()
+	if err := check.Sanitize(); err != nil {
+		return fmt.Errorf("policy %s/%s is not a valid CiliumNetworkPolicy: %w", p.Metadata.Namespace, p.Metadata.Name, err)
+	}
+	return nil
+}
+
 // MergePolicies folds policies that select the same workload into one, in first-seen order. Two
 // generated policies are "the same workload" when namespace, name and endpointSelector match; their
 // ingress and egress rules are concatenated, an identical rule (the DNS rule every FQDN policy
 // carries) is kept once, and the description says how many observed flows the object now covers.
 func MergePolicies(policies []*CiliumNetworkPolicy) []*CiliumNetworkPolicy {
+	return mergePolicies(policies, dnsRuleFor(dnsProfiles[DNSProfileKubernetes]))
+}
+
+// mergePolicies is MergePolicies with the run's DNS rule, so the plain-rule shadow check knows what to compare against
+func mergePolicies(policies []*CiliumNetworkPolicy, dnsRule EgressRule) []*CiliumNetworkPolicy {
 	var order []string
 	byKey := make(map[string]*CiliumNetworkPolicy)
 	merged := make(map[string]int)
 	for _, p := range policies {
-		key := p.Metadata.Namespace + "/" + p.Metadata.Name + "/" + labelsKey(p.Spec.EndpointSelector.MatchLabels)
+		key := p.Metadata.Namespace + "/" + p.Metadata.Name + "/" + labelsKey(MatchLabelsOf(p.Spec.EndpointSelector))
 		existing, ok := byKey[key]
 		if !ok {
 			byKey[key] = p
@@ -190,7 +210,7 @@ func MergePolicies(policies []*CiliumNetworkPolicy) []*CiliumNetworkPolicy {
 	result := make([]*CiliumNetworkPolicy, 0, len(order))
 	for _, key := range order {
 		p := byKey[key]
-		p.Spec.Egress = dropShadowedDNSRule(p.Spec.Egress)
+		p.Spec.Egress = dropShadowedDNSRule(p.Spec.Egress, dnsRule)
 		p.Spec.Description = Describe(p) // from the final rules, merged or not (0.6.2: the per-flow sentence said only the namespaces)
 		result = append(result, p)
 	}
@@ -202,8 +222,8 @@ func MergePolicies(policies []*CiliumNetworkPolicy) []*CiliumNetworkPolicy {
 // every name, so the L7 rule says everything the plain one said. Cilium accepted both, but the policy read as if
 // the rule were there twice (demo 31; fork issue #1). A narrower DNS rule (names from --l7) is not a superset and
 // leaves the plain rule alone.
-func dropShadowedDNSRule(rules []EgressRule) []EgressRule {
-	visibility := mustYAML(dnsVisibilityRule())
+func dropShadowedDNSRule(rules []EgressRule, dnsRule EgressRule) []EgressRule {
+	visibility := mustYAML(dnsRule)
 	shadowed := false
 	for _, r := range rules {
 		if mustYAML(r) == visibility {
@@ -214,9 +234,9 @@ func dropShadowedDNSRule(rules []EgressRule) []EgressRule {
 	if !shadowed {
 		return rules
 	}
-	plain := dnsVisibilityRule()
+	plain := dnsRule.DeepCopy()
 	plain.ToPorts[0].Rules = nil
-	plainYAML := mustYAML(plain)
+	plainYAML := mustYAML(*plain)
 	kept := rules[:0]
 	for _, r := range rules {
 		if mustYAML(r) != plainYAML {
@@ -262,8 +282,9 @@ func containsEgress(rules []EgressRule, r EgressRule) bool {
 	return false
 }
 
+// mustYAML is the canonical text of a value for equality: JSON of Cilium's types (their json tags, maps sorted)
 func mustYAML(v interface{}) string {
-	out, err := yaml.Marshal(v)
+	out, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Sprintf("%#v", v)
 	}
@@ -321,17 +342,13 @@ func EncodePolicies(policies []*CiliumNetworkPolicy) ([]byte, error) {
 		if i > 0 {
 			buf.WriteString("---\n")
 		}
-		var one bytes.Buffer
-		encoder := yaml.NewEncoder(&one)
-		encoder.SetIndent(2)
-		if err := encoder.Encode(p); err != nil {
+		b, err := render.Document(p)
+		if err != nil {
 			return nil, fmt.Errorf("failed to encode policy to YAML: %w", err)
 		}
-		if err := encoder.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close YAML encoder: %w", err)
-		}
+		one := bytes.NewBuffer(b)
 		if hasCIDR(p) {
-			addToCIDRComment(&one)
+			addToCIDRComment(one)
 		}
 		buf.Write(one.Bytes())
 	}
@@ -340,10 +357,7 @@ func EncodePolicies(policies []*CiliumNetworkPolicy) ([]byte, error) {
 
 // GeneratePolicy creates a CiliumNetworkPolicy from an aggregated flow
 func (g *Generator) GeneratePolicy(f *aggregator.AggregatedFlow) *CiliumNetworkPolicy {
-	policy := &CiliumNetworkPolicy{
-		APIVersion: "cilium.io/v2",
-		Kind:       "CiliumNetworkPolicy",
-	}
+	policy := NewPolicy()
 
 	if f.Direction == "INGRESS" {
 		g.generateIngressPolicy(policy, f)
@@ -365,9 +379,7 @@ func (g *Generator) generateIngressPolicy(policy *CiliumNetworkPolicy, f *aggreg
 	policy.Spec.Description = g.generateDescription(f)
 
 	// Endpoint selector based on destination labels
-	policy.Spec.EndpointSelector = LabelSelector{
-		MatchLabels: f.DestLabels,
-	}
+	policy.Spec.EndpointSelector = Selector(f.DestLabels)
 
 	if f.IsSourceEntity {
 		// Entity-based ingress (from remote-node, host, etc.)
@@ -395,9 +407,7 @@ func (g *Generator) generateEndpointIngressRules(policy *CiliumNetworkPolicy, f 
 		fromLabels[ClusterLabel] = c
 	}
 
-	ingressRule.FromEndpoints = []LabelSelector{
-		{MatchLabels: fromLabels},
-	}
+	ingressRule.FromEndpoints = []EndpointSelector{Selector(fromLabels)}
 
 	// Add port rules
 	ingressRule.ToPorts = g.portRules(f)
@@ -405,16 +415,29 @@ func (g *Generator) generateEndpointIngressRules(policy *CiliumNetworkPolicy, f 
 	policy.Spec.Ingress = []IngressRule{ingressRule}
 }
 
-// generateEntityIngressRules generates entity-based ingress rules (from remote-node, host, etc.)
+// generateEntityIngressRules generates entity-based ingress rules (from remote-node, host, etc.). A world source
+// with an address becomes fromCIDR (one /32 per observed address, 0.7.0): an egress-gateway IP, a load balancer's
+// client, an office range — what the receiver actually saw. Without an address it stays fromEntities: [world].
 func (g *Generator) generateEntityIngressRules(policy *CiliumNetworkPolicy, f *aggregator.AggregatedFlow) {
 	// Create ingress rule with fromEntities
 	ingressRule := IngressRule{}
 
+	if f.SourceEntity == "world" && len(f.SourceIPs) > 0 {
+		cidrs := make(CIDRSlice, 0, len(f.SourceIPs))
+		for _, ip := range f.SourceIPs {
+			cidrs = append(cidrs, api.CIDR(ip+"/32"))
+		}
+		ingressRule.FromCIDR = cidrs
+		ingressRule.ToPorts = g.portRules(f)
+		policy.Spec.Ingress = []IngressRule{ingressRule}
+		return
+	}
+
 	// For remote-node or host, include both to handle same-node and cross-node traffic
 	if f.SourceEntity == "remote-node" || f.SourceEntity == "host" {
-		ingressRule.FromEntities = []string{"remote-node", "host"}
+		ingressRule.FromEntities = EntitySlice{"remote-node", "host"}
 	} else {
-		ingressRule.FromEntities = []string{f.SourceEntity}
+		ingressRule.FromEntities = EntitySlice{api.Entity(f.SourceEntity)}
 	}
 
 	// Add port rules
@@ -434,9 +457,7 @@ func (g *Generator) generateEgressPolicy(policy *CiliumNetworkPolicy, f *aggrega
 	policy.Spec.Description = g.generateDescription(f)
 
 	// Endpoint selector based on source labels
-	policy.Spec.EndpointSelector = LabelSelector{
-		MatchLabels: f.SourceLabels,
-	}
+	policy.Spec.EndpointSelector = Selector(f.SourceLabels)
 
 	if f.IsDestEntityTraffic && f.DestEntity != "world" {
 		// Entity-based egress (kube-apiserver, host, etc.)
@@ -471,29 +492,27 @@ func (g *Generator) generateFQDNEgressRules(policy *CiliumNetworkPolicy, f *aggr
 	fqdnRule.ToPorts = g.portRules(f)
 
 	// Second rule: DNS resolution (required for toFQDNs to work)
-	dnsRule := dnsVisibilityRule()
-
-	policy.Spec.Egress = []EgressRule{fqdnRule, dnsRule}
+	policy.Spec.Egress = []EgressRule{fqdnRule, g.dnsRule()}
 }
 
 // generateWorldEgressRules generates CIDR-based egress rules for world traffic without FQDNs
 func (g *Generator) generateWorldEgressRules(policy *CiliumNetworkPolicy, f *aggregator.AggregatedFlow) {
 	// Convert destination IPs to CIDRs
-	cidrs := make([]string, 0, len(f.DestIPs))
+	cidrs := make(CIDRSlice, 0, len(f.DestIPs))
 	for _, ip := range f.DestIPs {
-		cidrs = append(cidrs, ip+"/32")
+		cidrs = append(cidrs, api.CIDR(ip+"/32"))
 	}
 
 	// Rule for CIDR-based world traffic
 	cidrRule := EgressRule{
-		ToCIDR:  cidrs,
-		ToPorts: g.portRules(f),
+		EgressCommonRule: EgressCommonRule{ToCIDR: cidrs},
+		ToPorts:          g.portRules(f),
 	}
 
 	policy.Spec.Egress = []EgressRule{cidrRule}
 	// E3: with the DNS proxy on, the next flows carry destination_names and the next generation writes toFQDNs
 	if g.dnsVisibility {
-		policy.Spec.Egress = append(policy.Spec.Egress, dnsVisibilityRule())
+		policy.Spec.Egress = append(policy.Spec.Egress, g.dnsRule())
 	}
 }
 
@@ -504,9 +523,9 @@ func (g *Generator) generateEntityEgressRules(policy *CiliumNetworkPolicy, f *ag
 
 	// For remote-node or host, include both to handle same-node and cross-node traffic
 	if f.DestEntity == "remote-node" || f.DestEntity == "host" {
-		entityRule.ToEntities = []string{"remote-node", "host"}
+		entityRule.ToEntities = EntitySlice{"remote-node", "host"}
 	} else {
-		entityRule.ToEntities = []string{f.DestEntity}
+		entityRule.ToEntities = EntitySlice{api.Entity(f.DestEntity)}
 	}
 
 	entityRule.ToPorts = g.portRules(f)
@@ -530,9 +549,7 @@ func (g *Generator) generateEndpointEgressRules(policy *CiliumNetworkPolicy, f *
 		toLabels[ClusterLabel] = c
 	}
 
-	egressRule.ToEndpoints = []LabelSelector{
-		{MatchLabels: toLabels},
-	}
+	egressRule.ToEndpoints = []EndpointSelector{Selector(toLabels)}
 
 	// Add port rules
 	egressRule.ToPorts = g.portRules(f)
@@ -675,23 +692,14 @@ func (g *Generator) writePolicyWithComment(policy *CiliumNetworkPolicy, needsCID
 	filename := fmt.Sprintf("%s-%s.yaml", policy.Metadata.Namespace, policy.Metadata.Name)
 	filePath := filepath.Join(g.outputDir, filename)
 
-	// Marshal to YAML with 2-space indentation
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(policy); err != nil {
+	b, err := render.Document(policy)
+	if err != nil {
 		return fmt.Errorf("failed to encode policy to YAML: %w", err)
 	}
-	if err := encoder.Close(); err != nil {
-		return fmt.Errorf("failed to close YAML encoder: %w", err)
-	}
-
-	// Add CIDR comment if needed
+	buf := bytes.NewBuffer(b)
 	if needsCIDRComment {
-		addToCIDRComment(&buf)
+		addToCIDRComment(buf)
 	}
-
-	// Write to file
 	if err := os.WriteFile(filePath, buf.Bytes(), 0644); err != nil {
 		return fmt.Errorf("failed to write policy file: %w", err)
 	}
@@ -706,7 +714,7 @@ func convertPorts(ports []aggregator.PortInfo) []Port {
 	for i, p := range ports {
 		result[i] = Port{
 			Port:     fmt.Sprintf("%d", p.Port),
-			Protocol: p.Protocol,
+			Protocol: api.L4Proto(strings.ToUpper(p.Protocol)), // the CRD's enum is upper-case only
 		}
 	}
 	return result
@@ -743,7 +751,7 @@ func addToCIDRComment(buf *bytes.Buffer) {
 
 	// The comment should align with the list item when uncommented (4 spaces for the -)
 	toCIDRComment := "    # To allow all traffic to world instead of specific IPs, replace toCIDR with:\n    # - toEntities:\n    #     - world\n"
-	if strings.Contains(content, "k8s-app: kube-dns") {
+	if strings.Contains(content, "rules:\n            dns:") {
 		toCIDRComment += "    # The DNS rule below turns the DNS proxy on for these endpoints: once flows carry destination_names,\n    # regenerate to get a toFQDNs rule instead of this CIDR.\n"
 	}
 

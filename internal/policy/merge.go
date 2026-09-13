@@ -2,6 +2,7 @@ package policy
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -30,6 +31,9 @@ func MergeDocument(existing []byte, generated *CiliumNetworkPolicy) (out []byte,
 		return nil, 0, errors.New("existing document has no metadata/spec")
 	}
 	if err := checkTarget(meta, spec, generated); err != nil {
+		return nil, 0, err
+	}
+	if err := Validate(generated); err != nil {
 		return nil, 0, err
 	}
 	for _, r := range generated.Spec.Ingress {
@@ -117,10 +121,11 @@ func scalarValue(m *yaml.Node, key string) string {
 	return ""
 }
 
-// toGeneric round-trips a typed value through YAML so it compares and stores like the existing document
+// toGeneric round-trips a typed value through JSON (Cilium's types carry json tags) so it compares and stores
+// like the existing document
 func toGeneric(v interface{}) interface{} {
 	var out interface{}
-	b, _ := yaml.Marshal(v)
+	b, _ := json.Marshal(v)
 	_ = yaml.Unmarshal(b, &out)
 	return out
 }
