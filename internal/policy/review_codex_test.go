@@ -66,6 +66,38 @@ spec:
             - port: "443"
               protocol: udp
 `,
+		"apiVersion": `apiVersion: cilium.io/v1
+kind: CiliumNetworkPolicy
+metadata:
+  name: wrong-version
+  namespace: ns
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [world]
+`,
+		"kind": `apiVersion: cilium.io/v2
+kind: NetworkPolicy
+metadata:
+  name: wrong-kind
+  namespace: ns
+spec:
+  endpointSelector: {}
+  egress:
+    - toEntities: [world]
+`,
+		"clusterwideNamespace": `apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: nodes
+  namespace: will-be-discarded
+spec:
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: worker
+  egress:
+    - toEntities: [world]
+`,
 		"nodeSelector": `apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -89,6 +121,9 @@ spec:
 				t.Fatal("a document the API server, the CRD or the agent refuses was accepted")
 			} else {
 				t.Log(err)
+				if name == "clusterwideNamespace" && !strings.Contains(err.Error(), "discards it") {
+					t.Fatalf("the refusal must say the API server would discard the namespace: %v", err)
+				}
 			}
 		})
 	}

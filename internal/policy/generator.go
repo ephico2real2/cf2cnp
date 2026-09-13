@@ -180,9 +180,24 @@ func Validate(p *CiliumNetworkPolicy) error {
 	refuse := func(format string, a ...interface{}) error {
 		return fmt.Errorf("%w %s/%s: %s", ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, fmt.Sprintf(format, a...))
 	}
+	// a decoded document names its kind and version; both must be the CRD's (customresource/validator.go refuses
+	// a wrong apiVersion). A policy built in memory carries neither — the generator sets them on the envelope.
+	if p.APIVersion != "" || p.Kind != "" {
+		if p.APIVersion != "cilium.io/v2" {
+			return refuse("apiVersion %q must be cilium.io/v2", p.APIVersion)
+		}
+		if p.Kind != "CiliumNetworkPolicy" && p.Kind != "CiliumClusterwideNetworkPolicy" {
+			return refuse("kind %q is not a Cilium policy", p.Kind)
+		}
+	}
+	clusterwide := p.Kind == "CiliumClusterwideNetworkPolicy"
+	// the API server clears a namespace on a cluster-scoped object (rest/meta.go) — the file would apply and mean
+	// something else than it says; an offline validator refuses and says why (review ENH-003, Codex, second pass)
+	if clusterwide && p.Metadata.Namespace != "" {
+		return refuse("metadata.namespace %q: not allowed on a CiliumClusterwideNetworkPolicy — Kubernetes discards it on a cluster-scoped object, so remove it", p.Metadata.Namespace)
+	}
 	// the API server's ObjectMeta checks (name and namespace DNS-1123, label keys and values, annotations, …); a
 	// namespaced policy without a namespace gets kubectl's default for the check, as kubectl would fill it
-	clusterwide := p.Kind == "CiliumClusterwideNetworkPolicy"
 	meta := p.Metadata.DeepCopy()
 	if meta.Namespace == "" && !clusterwide {
 		meta.Namespace = "default"

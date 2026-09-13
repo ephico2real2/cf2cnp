@@ -140,6 +140,7 @@ are not already there. Running it twice changes nothing. The existing policy mus
 	mergeCmd.Flags().StringVar(&existingFile, "existing", "", "Existing CiliumNetworkPolicy YAML (required)")
 	mergeCmd.Flags().StringVarP(&inputDir, "input", "i", "", "Flow file (one flow, an array, or one per line) or a directory of such files (required)")
 	mergeCmd.Flags().StringVarP(&outputFile, "output", "o", "", "Where to write the merged policy (default: --existing, in place)")
+	mergeCmd.Flags().BoolVar(&l7, "l7", false, "Emit layer-7 rules (HTTP method+path, DNS names) from the flows' l7 records, as generate --l7 does")
 	mergeCmd.Flags().StringVar(&dnsProfile, "dns-profile", "auto", "The DNS resolver rule (see generate --dns-profile)")
 	mergeCmd.Flags().StringVar(&dnsResolver, "dns-resolver", "", "The DNS resolver explicitly (see generate --dns-resolver)")
 	mergeCmd.MarkFlagRequired("existing")
@@ -288,6 +289,9 @@ func runMerge(cmd *cobra.Command, args []string) error {
 	generator := policy.NewGenerator("")
 	if err := applyDNSFlags(generator); err != nil {
 		return err
+	}
+	if l7 {
+		generator = generator.WithL7() // review ENH-003 (Codex, second pass): the policy-PR template passes --l7 to merge
 	}
 	policies, err := generator.BuildPolicies(aggregator.AggregateFlows(flows))
 	if err != nil {

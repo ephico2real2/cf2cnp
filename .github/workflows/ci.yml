@@ -61,3 +61,11 @@ jobs:
           go build -ldflags="-X main.version=ci" -o /tmp/cf2cnp ./cmd/cf2cnp
           /tmp/cf2cnp version
           /tmp/cf2cnp validate internal/testdata/golden/*/expected.yaml
+      - name: The policy-PR template's calls work (merge takes --l7)
+        run: |
+          set -eu
+          out=$(mktemp -d)
+          /tmp/cf2cnp generate --input internal/testdata/l7-http-request.json --output "$out"
+          existing=$(find "$out" -name '*.yaml' | head -1)
+          /tmp/cf2cnp merge --l7 --existing "$existing" --input internal/testdata/l7-http-request.json --output "$out/merged.yaml"
+          grep -q 'http:' "$out/merged.yaml"
