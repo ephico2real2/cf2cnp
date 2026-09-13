@@ -229,17 +229,22 @@ func TestGenerate_ExcludePeers(t *testing.T) {
 	}
 }
 
-// Review finding: the exclude key must be the label the parser keeps — a peer with only an instance label (no
-// name) is named by instance, and an exclude on its fallback app label must not match
-func TestExclude_UsesTheLabelTheParserKeeps(t *testing.T) {
-	f := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/instance": "blue"}}
-	if n := excludeFlows([]*flow.ParsedFlow{f}, []string{"app=payments"}); len(n) != 1 {
+// Review finding: a peer is identified by its whole priority label set — unticking shop/frontend must not remove
+// shop/backend, while a bare name=shop exclude still removes every shop component
+func TestExclude_WholeLabelSetAndSingleLabel(t *testing.T) {
+	front := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/name": "shop", "app.kubernetes.io/component": "frontend"}}
+	back := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/name": "shop", "app.kubernetes.io/component": "backend"}}
+	if n := excludeFlows([]*flow.ParsedFlow{front, back}, []string{"app.kubernetes.io/name=shop,app.kubernetes.io/component=frontend"}); len(n) != 1 || n[0] != back {
+		t.Fatalf("the whole set must exclude only the frontend, got %d", len(n))
+	}
+	if n := excludeFlows([]*flow.ParsedFlow{front, back}, []string{"app.kubernetes.io/name=shop"}); len(n) != 0 {
+		t.Fatalf("a bare name excludes every component, got %d", len(n))
+	}
+	inst := &flow.ParsedFlow{Direction: "INGRESS", SourceLabels: map[string]string{"app.kubernetes.io/instance": "blue"}}
+	if n := excludeFlows([]*flow.ParsedFlow{inst}, []string{"app=payments"}); len(n) != 1 {
 		t.Fatalf("exclude=app= must not drop a peer the parser named by instance")
 	}
-	if n := excludeFlows([]*flow.ParsedFlow{f}, []string{"app.kubernetes.io/instance=blue"}); len(n) != 0 {
-		t.Fatalf("exclude=instance= must drop that peer")
-	}
-	// and the page's list is the parser's list, in order (kept in sync by this test reading the served page)
+	// the page's key lists exactly the parser's priority labels, then the fallbacks, in order
 	rec := httptest.NewRecorder()
 	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	page := rec.Body.String()

@@ -184,11 +184,26 @@ func excludeFlows(flows []*flow.ParsedFlow, excludes []string) []*flow.ParsedFlo
 	return kept
 }
 
-// peerMatches reports whether the labels carry any "key=value" of the excludes
+// peerMatches reports whether the labels carry one of the excludes. An exclude is "key=value", or several
+// joined by commas that must ALL match — the page sends a peer's whole identifying set
+// (app.kubernetes.io/name=shop,app.kubernetes.io/component=frontend), so unticking one component never
+// removes the others (review finding); a single key=value still works and matches every peer carrying it.
 func peerMatches(labels map[string]string, excludes []string) bool {
 	for _, ex := range excludes {
-		kv := strings.SplitN(ex, "=", 2)
-		if len(kv) == 2 && labels[kv[0]] == kv[1] {
+		all := true
+		n := 0
+		for _, pair := range strings.Split(ex, ",") {
+			kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			n++
+			if labels[kv[0]] != kv[1] {
+				all = false
+				break
+			}
+		}
+		if n > 0 && all {
 			return true
 		}
 	}
@@ -493,16 +508,17 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             if (comp && comp !== name) name += '/' + comp;
             return name;
         }
-        // peerKey is the label the policy would name for a peer — the FIRST label the server's extractLabels keeps,
-        // in its exact priority order (review finding: a peer with app.kubernetes.io/instance and a fallback app label
-        // is named by instance in the policy, so the checkbox must say instance, or the exclude never matches)
+        // peerKey is the identifying label set the policy would name for a peer, joined by commas — the same labels
+        // the server's extractLabels keeps: every app.kubernetes.io/{name,component,instance} present, else the first
+        // fallback label (app, k8s-app, name, component, instance). Unticking a peer sends this whole set as one
+        // exclude, so one component never removes its siblings (review finding).
         function peerKey(ep) {
             const labels = (ep && ep.labels) || [];
-            for (const k of ['app.kubernetes.io/name', 'app.kubernetes.io/component', 'app.kubernetes.io/instance',
-                             'app', 'k8s-app', 'name', 'component', 'instance']) {
-                const l = labels.find(x => x.startsWith('k8s:' + k + '=') || x.startsWith(k + '='));
-                if (l) return k + '=' + l.split('=').slice(1).join('=');
-            }
+            const val = (k) => { const l = labels.find(x => x.startsWith('k8s:' + k + '=') || x.startsWith(k + '=')); return l ? l.split('=').slice(1).join('=') : null; };
+            const parts = [];
+            for (const k of ['app.kubernetes.io/name', 'app.kubernetes.io/component', 'app.kubernetes.io/instance']) { const v = val(k); if (v !== null) parts.push(k + '=' + v); }
+            if (parts.length) return parts.join(',');
+            for (const k of ['app', 'k8s-app', 'name', 'component', 'instance']) { const v = val(k); if (v !== null) return k + '=' + v; }
             return '';
         }
         // renderPeers lists every distinct peer (the source of an INGRESS flow, the destination of an EGRESS one)
@@ -520,7 +536,7 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             const title = document.createElement('div'); title.className = 'summary'; title.textContent = 'Peers the policy would allow — untick to exclude:'; box.appendChild(title);
             for (const k of keys) {
                 const label = document.createElement('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true; cb.dataset.peer = k;
-                label.appendChild(cb); label.appendChild(document.createTextNode(' ' + k.split('=')[1]));
+                label.appendChild(cb); label.appendChild(document.createTextNode(' ' + k.split(',').map(p => p.split('=').slice(1).join('=')).join('/')));
                 const m = document.createElement('span'); m.className = 'muted'; m.textContent = '(' + counts[k] + ' flow' + (counts[k] === 1 ? '' : 's') + ')'; label.appendChild(m);
                 box.appendChild(label);
             }
