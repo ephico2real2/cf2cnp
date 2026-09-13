@@ -37,9 +37,31 @@ var ErrNameNeedsOnePolicy = errors.New("a policy name can only be set when the f
 
 // Generator generates CiliumNetworkPolicies from aggregated flows
 type Generator struct {
-	outputDir    string
-	nameOverride string
-	l7           bool // E2: emit HTTP/DNS rules from the flows' l7 records
+	outputDir     string
+	nameOverride  string
+	l7            bool // E2: emit HTTP/DNS rules from the flows' l7 records
+	dnsVisibility bool // E3: add the kube-dns L7 DNS rule to world policies that have no names
+}
+
+// WithDNSVisibility adds the kube-dns L7 DNS rule to a world policy that has no names, so that the DNS
+// proxy records them and the next generation can write toFQDNs instead of toCIDR. Names come only from
+// the DNS proxy, and the proxy is enabled by exactly this rule (cilium Documentation/security/policy/layer3.rst,
+// "Obtaining DNS Data for use by toFQDNs").
+func (g *Generator) WithDNSVisibility() *Generator {
+	g.dnsVisibility = true
+	return g
+}
+
+// dnsVisibilityRule is the egress rule that turns the DNS proxy on for the selected endpoints — the same
+// rule every toFQDNs policy carries, factored out so both paths write one thing.
+func dnsVisibilityRule() EgressRule {
+	return EgressRule{
+		ToEndpoints: []LabelSelector{{MatchLabels: map[string]string{flow.GetNamespaceLabel(): "kube-system", "k8s-app": "kube-dns"}}},
+		ToPorts: []PortRule{{
+			Ports: []Port{{Port: "53", Protocol: "UDP"}},
+			Rules: &L7Rules{DNS: []DNSRule{{MatchPattern: "*"}}},
+		}},
+	}
 }
 
 // WithL7 makes the generator write layer-7 rules (HTTP method+path, DNS names) where the flows carry
@@ -435,28 +457,7 @@ func (g *Generator) generateFQDNEgressRules(policy *CiliumNetworkPolicy, f *aggr
 	fqdnRule.ToPorts = g.portRules(f)
 
 	// Second rule: DNS resolution (required for toFQDNs to work)
-	dnsRule := EgressRule{
-		ToEndpoints: []LabelSelector{
-			{
-				MatchLabels: map[string]string{
-					flow.GetNamespaceLabel(): "kube-system",
-					"k8s-app":                "kube-dns",
-				},
-			},
-		},
-		ToPorts: []PortRule{
-			{
-				Ports: []Port{
-					{Port: "53", Protocol: "UDP"},
-				},
-				Rules: &L7Rules{
-					DNS: []DNSRule{
-						{MatchPattern: "*"},
-					},
-				},
-			},
-		},
-	}
+	dnsRule := dnsVisibilityRule()
 
 	policy.Spec.Egress = []EgressRule{fqdnRule, dnsRule}
 }
@@ -476,6 +477,10 @@ func (g *Generator) generateWorldEgressRules(policy *CiliumNetworkPolicy, f *agg
 	}
 
 	policy.Spec.Egress = []EgressRule{cidrRule}
+	// E3: with the DNS proxy on, the next flows carry destination_names and the next generation writes toFQDNs
+	if g.dnsVisibility {
+		policy.Spec.Egress = append(policy.Spec.Egress, dnsVisibilityRule())
+	}
 }
 
 // generateEntityEgressRules generates entity-based egress rules for reserved entities (kube-apiserver, host, etc.)
@@ -724,6 +729,9 @@ func addToCIDRComment(buf *bytes.Buffer) {
 
 	// The comment should align with the list item when uncommented (4 spaces for the -)
 	toCIDRComment := "    # To allow all traffic to world instead of specific IPs, replace toCIDR with:\n    # - toEntities:\n    #     - world\n"
+	if strings.Contains(content, "k8s-app: kube-dns") {
+		toCIDRComment += "    # The DNS rule below turns the DNS proxy on for these endpoints: once flows carry destination_names,\n    # regenerate to get a toFQDNs rule instead of this CIDR.\n"
+	}
 
 	// Insert the comment before toPorts
 	newContent := content[:insertPos] + toCIDRComment + content[insertPos:]

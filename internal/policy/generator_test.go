@@ -342,3 +342,23 @@ func TestBuildPolicies_L7DNSRules_KeepsTheQueryAsObserved(t *testing.T) {
 		t.Fatalf("the query must be kept as the resolver sent it, got %+v", rules)
 	}
 }
+
+// E3: a world flow without names gets, on request, the same DNS rule every toFQDNs policy carries; without
+// the option the output is unchanged
+func TestBuildPolicies_DNSVisibilityCompanion(t *testing.T) {
+	plain, _ := NewGenerator("").BuildPolicies(load(t, "egress-pos-to-world.json"))
+	if len(plain[0].Spec.Egress) != 1 {
+		t.Fatalf("without the option: one rule, got %d", len(plain[0].Spec.Egress))
+	}
+	ps, _ := NewGenerator("").WithDNSVisibility().BuildPolicies(load(t, "egress-pos-to-world.json"))
+	if len(ps[0].Spec.Egress) != 2 {
+		t.Fatalf("with the option: two rules, got %d", len(ps[0].Spec.Egress))
+	}
+	if mustYAML(ps[0].Spec.Egress[1]) != mustYAML(dnsVisibilityRule()) {
+		t.Fatalf("the second rule must be the DNS visibility rule:\n%s", mustYAML(ps[0].Spec.Egress[1]))
+	}
+	out, _ := EncodePolicies(ps)
+	if !strings.Contains(string(out), "regenerate to get a toFQDNs rule") {
+		t.Fatalf("the comment must say what the rule is for:\n%s", out)
+	}
+}

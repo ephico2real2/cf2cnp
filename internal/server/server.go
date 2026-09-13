@@ -411,6 +411,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
         <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
         <label><input id="l7" type="checkbox"> Layer-7 rules <span class="muted">(HTTP method + path, DNS names, from flows that carry them; the port then goes through the proxy)</span></label>
+        <label><input id="dnsVisibility" type="checkbox"> DNS visibility <span class="muted">(world traffic without names: add the kube-dns DNS rule so the next flows carry names)</span></label>
     </div>
     <div class="buttons">
         <button onclick="generatePolicy()">Generate Policy</button>
@@ -478,7 +479,9 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             const input = document.getElementById('flowInput').value;
             const result = document.getElementById('result'); const apply = document.getElementById('apply');
             const name = document.getElementById('policyName').value.trim();
-            const params = []; if (name) params.push('name=' + encodeURIComponent(name)); if (document.getElementById('l7').checked) params.push('l7=true');
+            const params = []; if (name) params.push('name=' + encodeURIComponent(name));
+            if (document.getElementById('l7').checked) params.push('l7=true');
+            if (document.getElementById('dnsVisibility').checked) params.push('dnsVisibility=true');
             const url = '/generate' + (params.length ? '?' + params.join('&') : '');
             try {
                 const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: input });
@@ -603,6 +606,9 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("l7") == "true" {
 		generator = generator.WithL7() // E2: opt-in layer-7 rules
+	}
+	if r.URL.Query().Get("dnsVisibility") == "true" {
+		generator = generator.WithDNSVisibility() // E3: opt-in DNS visibility companion rule
 	}
 	policies, yamlBytes, err := generator.GeneratePoliciesWithYAML(aggregatedFlows)
 	if err != nil {
