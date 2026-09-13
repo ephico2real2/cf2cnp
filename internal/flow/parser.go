@@ -146,8 +146,8 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 	// ClusterMesh: which cluster each side is in. Since Cilium 1.19 a selector without
 	// io.cilium.k8s.policy.cluster matches the LOCAL cluster only, so a policy generated from a
 	// cross-cluster flow must name the peer's cluster or it excludes that very peer.
-	parsed.SourceCluster = flow.Source.ClusterName
-	parsed.DestCluster = flow.Destination.ClusterName
+	parsed.SourceCluster = clusterOf(flow.Source)
+	parsed.DestCluster = clusterOf(flow.Destination)
 
 	// Check if source is a reserved entity (remote-node, host, etc.)
 	parsed.SourceEntity = getReservedEntity(flow.Source.Labels)
@@ -185,6 +185,28 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 	}
 
 	return parsed, nil
+}
+
+// clusterOf is the endpoint's cluster: cluster_name when Hubble set it, else the io.cilium.k8s.policy.cluster
+// label the endpoint carries anyway (review finding: a flow with an empty cluster_name still names the cluster
+// in its labels, and dropping it there reintroduced the local-only bug E1 exists to fix)
+func clusterOf(ep Endpoint) string {
+	if ep.ClusterName != "" {
+		return ep.ClusterName
+	}
+	return labelValue(ep.Labels, "io.cilium.k8s.policy.cluster")
+}
+
+// labelValue returns the value of key in Hubble's "k8s:key=value" (or "key=value") label list, or ""
+func labelValue(labels []string, key string) string {
+	for _, l := range labels {
+		for _, prefix := range []string{"k8s:" + key + "=", key + "="} {
+			if strings.HasPrefix(l, prefix) {
+				return strings.TrimPrefix(l, prefix)
+			}
+		}
+	}
+	return ""
 }
 
 // extractLabels extracts and filters labels from Hubble label format

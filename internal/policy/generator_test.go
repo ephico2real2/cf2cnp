@@ -229,3 +229,22 @@ func TestBuildPolicies_SameLabelsTwoClustersTwoRules(t *testing.T) {
 		t.Fatalf("rules: %+v", ps[0].Spec.Ingress)
 	}
 }
+
+// Review finding: an empty destination.cluster_name (Hubble without cluster.name) must not lose the cluster the
+// flow's labels carry
+func TestBuildPolicies_ClusterLabelWhenClusterNameEmpty(t *testing.T) {
+	raw := []byte(`{"flow":{"uuid":"x","traffic_direction":"EGRESS","is_reply":false,"l4":{"TCP":{"destination_port":6379}},
+	  "source":{"cluster_name":"poc2","namespace":"bank","labels":["k8s:app=payments","k8s:io.cilium.k8s.policy.cluster=poc2"]},
+	  "destination":{"namespace":"bank","labels":["k8s:app=redis","k8s:io.cilium.k8s.policy.cluster=poc1"]}}}`)
+	f, err := flow.ParseFlowsFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := NewGenerator("").BuildPolicies(aggregator.AggregateFlows(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if to := ps[0].Spec.Egress[0].ToEndpoints[0].MatchLabels; to[ClusterLabel] != "poc1" {
+		t.Fatalf("empty destination.cluster_name must still yield cluster=poc1 from the label, got %v", to)
+	}
+}
