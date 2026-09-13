@@ -43,12 +43,19 @@ jobs:
             go run sigs.k8s.io/kubectl-validate@v0.0.4 --local-crds "$crds" "$f"
           done
       - name: The Kubernetes client machinery stays out of the binary
+        # Two small helpers ride along with Cilium's policy API (k8s.io/client-go/util/jsonpath and its forked template,
+        # via github.com/cilium/cilium/pkg/command); the line not to cross is the client itself and Cilium's k8s client
+        # package, which pull the apiserver machinery in (18 MB → 94 MB, docs/CRD-SPEC-FORENSICS.md §3). The size ceiling
+        # is the real guard.
         run: |
           set -eu
-          if go list -deps ./cmd/cf2cnp | grep -E '^k8s.io/client-go|^github.com/cilium/cilium/pkg/k8s/client'; then
-            echo "the client packages are imported — the binary would grow from 18 MB to 94 MB (docs/CRD-SPEC-FORENSICS.md)"; exit 1
+          if go list -deps ./cmd/cf2cnp | grep -E '^k8s.io/client-go/(kubernetes|rest|tools/clientcmd|dynamic|discovery)|^github.com/cilium/cilium/pkg/k8s/client($|/)'; then
+            echo "the client packages are imported — see docs/CRD-SPEC-FORENSICS.md §3"; exit 1
           fi
-          echo "dependency graph clean"
+          go build -trimpath -ldflags="-s -w" -o /tmp/cf2cnp-size ./cmd/cf2cnp
+          size=$(stat -c %s /tmp/cf2cnp-size)
+          echo "binary: $size bytes"
+          test "$size" -lt 40000000 || { echo "the binary passed 40 MB: something heavy joined the graph"; exit 1; }
       - name: The binary names the spec it supports
         run: |
           go build -ldflags="-X main.version=ci" -o /tmp/cf2cnp ./cmd/cf2cnp
