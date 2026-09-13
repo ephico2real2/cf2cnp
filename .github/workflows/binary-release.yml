@@ -1,0 +1,39 @@
+name: Release binaries
+
+# On a v* tag, build the CLI for linux (amd64, arm64) and darwin (amd64, arm64) and attach the archives to
+# the GitHub release of that tag — so a pipeline (E10: policy as code) can `curl` the binary instead of building
+# it. No goreleaser: four `go build`s and `gh release upload`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "dist/cf2cnp" ./cmd/cf2cnp
+            tar -C dist -czf "dist/cf2cnp_${VERSION}_${os}_${arch}.tar.gz" cf2cnp
+            rm dist/cf2cnp
+          done
+          (cd dist && sha256sum *.tar.gz > "cf2cnp_${VERSION}_checksums.txt")
+          ls -l dist
+      - name: Attach to the release of this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "cf2cnp $GITHUB_REF_NAME" --notes "cf2cnp $GITHUB_REF_NAME — see the chart release for Helm."
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
