@@ -1,8 +1,11 @@
 package flow
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +47,49 @@ func ParseFlowFromBytes(data []byte) (*ParsedFlow, error) {
 	return parseFlow(&flowData.Flow)
 }
 
+// ParseFlowsFromBytes parses one or many Hubble flows from JSON bytes. Three shapes are accepted, because that is what
+// the tools produce: a single flow object (a saved file, the Grafana action's log line), a JSON array of flow objects,
+// and newline-delimited objects — the output of `hubble observe -o json`, one flow per line. Blank lines are skipped;
+// the first object that does not parse names its position in the error.
+func ParseFlowsFromBytes(data []byte) ([]*ParsedFlow, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, errors.New("no flow data")
+	}
+
+	var raw []HubbleFlowData
+	if trimmed[0] == '[' {
+		if err := json.Unmarshal(trimmed, &raw); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON array of flows: %w", err)
+		}
+	} else {
+		dec := json.NewDecoder(bytes.NewReader(trimmed))
+		for i := 1; ; i++ {
+			var fd HubbleFlowData
+			if err := dec.Decode(&fd); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return nil, fmt.Errorf("failed to parse flow #%d: %w", i, err)
+			}
+			raw = append(raw, fd)
+		}
+	}
+	if len(raw) == 0 {
+		return nil, errors.New("no flow objects found")
+	}
+
+	flows := make([]*ParsedFlow, 0, len(raw))
+	for i := range raw {
+		parsed, err := parseFlow(&raw[i].Flow)
+		if err != nil {
+			return nil, fmt.Errorf("flow #%d: %w", i+1, err)
+		}
+		flows = append(flows, parsed)
+	}
+	return flows, nil
+}
+
 // ParseFlowsFromDirectory parses all JSON flow files from a directory
 func ParseFlowsFromDirectory(dirPath string) ([]*ParsedFlow, error) {
 	entries, err := os.ReadDir(dirPath)
@@ -61,11 +107,15 @@ func ParseFlowsFromDirectory(dirPath string) ([]*ParsedFlow, error) {
 		}
 
 		filePath := filepath.Join(dirPath, entry.Name())
-		flow, err := ParseFlowFile(filePath)
+		data, err := os.ReadFile(filePath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read file %s: %w", filePath, err)
 		}
-		flows = append(flows, flow)
+		parsed, err := ParseFlowsFromBytes(data)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", filePath, err)
+		}
+		flows = append(flows, parsed...)
 	}
 
 	return flows, nil

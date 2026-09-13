@@ -32,6 +32,9 @@ The following table lists the configurable parameters of the CF2CNP chart and th
 | `service.type` | Service type | `ClusterIP` |
 | `service.port` | Service port | `80` |
 | `containerPort` | Container port | `8080` |
+| `externalURL` | Base URL clients reach cf2cnp at, for `download_url` (empty = derived from the request and its `Forwarded` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers) | `""` |
+| `extraArgs` | Extra arguments appended to `cf2cnp serve --port <containerPort>` | `[]` |
+| `extraEnv` | Extra environment variables (`CF2CNP_EXTERNAL_URL` is an alternative to `externalURL`) | `[]` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
 | `ingress.annotations` | Ingress annotations | `{}` |

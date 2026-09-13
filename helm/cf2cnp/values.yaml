@@ -43,6 +43,18 @@ service:
 
 containerPort: 8080
 
+# Base URL clients reach cf2cnp at (scheme://host[:port][/prefix]), used for the download_url in JSON
+# answers (the Grafana action). Leave empty to derive it from each request and the Forwarded /
+# X-Forwarded-Proto / X-Forwarded-Host headers a TLS-terminating ingress or gateway sets. Set it when
+# the proxy strips those headers or the public URL differs from the Host the pod sees.
+externalURL: ""
+
+# Extra arguments appended to `cf2cnp serve --port <containerPort>` (e.g. a flag this chart has no value for)
+extraArgs: []
+
+# Extra environment variables for the container (list of EnvVar; CF2CNP_EXTERNAL_URL is an alternative to externalURL)
+extraEnv: []
+
 ingress:
   enabled: false
   className: ""

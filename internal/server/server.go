@@ -28,16 +28,20 @@ type CachedPolicy struct {
 
 // Server represents the HTTP server for policy generation
 type Server struct {
-	port  int
-	cache map[string]*CachedPolicy
-	mu    sync.RWMutex
+	port        int
+	externalURL string
+	cache       map[string]*CachedPolicy
+	mu          sync.RWMutex
 }
 
-// NewServer creates a new HTTP server
-func NewServer(port int) *Server {
+// NewServer creates a new HTTP server. externalURL, when set, is the base URL clients reach the
+// server at (scheme://host[:port][/prefix]); it wins over anything the request says when building
+// download_url. Leave it empty to derive the base from the request (see baseURL).
+func NewServer(port int, externalURL string) *Server {
 	s := &Server{
-		port:  port,
-		cache: make(map[string]*CachedPolicy),
+		port:        port,
+		externalURL: strings.TrimRight(externalURL, "/"),
+		cache:       make(map[string]*CachedPolicy),
 	}
 	// Start cache cleanup goroutine
 	go s.cleanupCache()
@@ -81,6 +85,85 @@ func (s *Server) Start() error {
 	log.Printf("GET /health - Health check endpoint")
 
 	return http.ListenAndServe(addr, nil)
+}
+
+// baseURL is the base clients can reach this server at, for the download_url in JSON answers.
+// Precedence: the configured external URL; then the proxy headers a TLS-terminating ingress or
+// gateway sets — RFC 7239 `Forwarded` (proto=, host=) and the de-facto X-Forwarded-Proto /
+// X-Forwarded-Host; then the request itself (TLS on the listener, the Host header). Without the
+// header check a server behind an https-only route answered http:// URLs to a port that was closed.
+func (s *Server) baseURL(r *http.Request) string {
+	if s.externalURL != "" {
+		return s.externalURL
+	}
+	scheme, host := "", r.Host
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if fwd := r.Header.Get("Forwarded"); fwd != "" {
+		// first (closest to the client) element; pairs are `k=v` separated by ';', values may be quoted
+		for _, pair := range strings.Split(strings.Split(fwd, ",")[0], ";") {
+			kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			v := strings.Trim(strings.TrimSpace(kv[1]), "\"")
+			switch strings.ToLower(strings.TrimSpace(kv[0])) {
+			case "proto":
+				if v == "http" || v == "https" {
+					scheme = v
+				}
+			case "host":
+				if v != "" {
+					host = v
+				}
+			}
+		}
+	}
+	if v := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])); v == "http" || v == "https" {
+		scheme = v
+	}
+	if v := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0]); v != "" {
+		host = v
+	}
+	if scheme == "" {
+		scheme = "http"
+	}
+	return scheme + "://" + host
+}
+
+// wantsJSON reports whether the client asked for the JSON answer (Grafana's action sets
+// X-Grafana-Action; any client may send Accept: application/json)
+func wantsJSON(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "application/json") || r.Header.Get("X-Grafana-Action") != ""
+}
+
+// respond writes the generated YAML either as a direct attachment or, for JSON clients, caches it under
+// id and answers with the download URL, the filename, the counts and the YAML itself.
+func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yamlBytes []byte, filename, message string, flows, policies int) {
+	if !wantsJSON(r) {
+		w.Header().Set("Content-Type", "application/x-yaml")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+		w.WriteHeader(http.StatusOK)
+		w.Write(yamlBytes)
+		log.Printf("Generated policy (direct): %s", filename)
+		return
+	}
+	s.mu.Lock()
+	s.cache[id] = &CachedPolicy{Content: yamlBytes, Filename: filename, CreatedAt: time.Now()}
+	s.mu.Unlock()
+	downloadURL := fmt.Sprintf("%s/download/%s", s.baseURL(r), id)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"filename":     filename,
+		"download_url": downloadURL,
+		"message":      message,
+		"flows":        flows,
+		"policies":     policies,
+		"yaml":         string(yamlBytes),
+	})
+	log.Printf("Generated policy (cached): %s, download: %s", filename, downloadURL)
 }
 
 // corsMiddleware adds CORS headers and handles preflight requests
@@ -212,6 +295,16 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
             margin-top: 1rem;
             white-space: pre-wrap;
         }
+        .summary { color: #94a3b8; font-size: 0.9em; margin: 8px 0; white-space: pre-wrap; }
+        .muted { color: #64748b; font-weight: normal; }
+        .controls { margin: 8px 0; }
+        .controls label { display: block; margin-bottom: 4px; color: #cbd5e1; font-weight: 600; }
+        .controls input { width: 100%; box-sizing: border-box; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-family: monospace; }
+        .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+        .buttons button { margin: 0; }
+        button.secondary { background: #1e293b; border: 1px solid #334155; box-shadow: none; }
+        button.secondary:hover { background: #334155; }
+        button:disabled { opacity: 0.45; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -260,9 +353,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
     
     <div class="endpoint">
         <span class="method">POST</span> <span class="path">/generate</span>
-        <p>Send a Hubble flow JSON payload and receive a download URL or direct YAML.</p>
+        <p>Send Hubble flow JSON — one flow, a JSON array, or one flow per line — and receive the policies.
+        <code>?name=&lt;name&gt;</code> names the (single) resulting policy.</p>
         <p><strong>Content-Type:</strong> application/json</p>
-        <p><strong>Response:</strong> JSON with download URL (for Grafana) or YAML file (for curl)</p>
+        <p><strong>Response:</strong> YAML (one document per policy) for curl; with <code>Accept: application/json</code>
+        or <code>X-Grafana-Action</code>, JSON <code>{download_url, filename, yaml, flows, policies}</code></p>
     </div>
 
     <div class="endpoint">
@@ -276,81 +371,104 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <h2>Try it out</h2>
-    <p>Paste your Hubble flow JSON below:</p>
-    <textarea id="flowInput" placeholder='{"flow": {"traffic_direction": "INGRESS", ...}}'></textarea>
-    <br>
-    <button onclick="generatePolicy()">Generate Policy</button>
-    
+    <p>Paste Hubble flow JSON below — one flow, a JSON array, or one flow per line (the output of
+    <code>hubble observe -o json</code>). Flows to the same workload become one policy with one rule per peer.</p>
+    <textarea id="flowInput" placeholder='{"flow": {"traffic_direction": "INGRESS", ...}}' oninput="summarize()"></textarea>
+    <div id="summary" class="summary"></div>
+    <div class="controls">
+        <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
+        <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
+    </div>
+    <div class="buttons">
+        <button onclick="generatePolicy()">Generate Policy</button>
+        <button class="secondary" onclick="copyYAML()" id="copyBtn" disabled>Copy YAML</button>
+        <button class="secondary" onclick="downloadYAML()" id="downloadBtn" disabled>Download YAML</button>
+        <button class="secondary" onclick="loadExample()">Load example</button>
+        <button class="secondary" onclick="clearAll()">Clear</button>
+    </div>
+    <div id="apply" class="summary"></div>
     <pre id="result"></pre>
 
     <h2>Example using curl</h2>
-    <pre><code>curl -X POST http://localhost:8080/generate \
-  -H "Content-Type: application/json" \
-  -d @flow.json \
-  -o policy.yaml</code></pre>
+    <pre><code># one flow
+curl -X POST http://localhost:8080/generate -H "Content-Type: application/json" -d @flow.json -o policy.yaml
+
+# many flows at once: one policy per workload, one rule per peer
+hubble observe --namespace my-namespace --last 200 -o json > flows.json
+curl -X POST http://localhost:8080/generate --data-binary @flows.json -o policies.yaml
+
+# name the resulting policy
+curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -o policy.yaml</code></pre>
 
     <script>
+        // Parse what the textarea holds the way the server does: an array, or objects separated by whitespace.
+        function parseFlows(text) {
+            const t = text.trim();
+            if (!t) return [];
+            if (t[0] === '[') return JSON.parse(t);
+            const flows = []; let depth = 0, start = -1, inStr = false, esc = false;
+            for (let i = 0; i < t.length; i++) {
+                const c = t[i];
+                if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+                if (c === '"') inStr = true;
+                else if (c === '{') { if (depth === 0) start = i; depth++; }
+                else if (c === '}') { depth--; if (depth === 0 && start >= 0) { flows.push(JSON.parse(t.slice(start, i + 1))); start = -1; } }
+            }
+            return flows;
+        }
+        function who(ep) {
+            if (!ep) return '?';
+            const labels = ep.labels || [];
+            const pick = (k) => { const l = labels.find(x => x.startsWith('k8s:' + k + '=')); return l ? l.split('=')[1] : null; };
+            return pick('app.kubernetes.io/name') || pick('app') || pick('k8s-app') || ep.pod_name || (labels.find(x => x.startsWith('reserved:')) || '?').replace('reserved:', '');
+        }
+        function summarize() {
+            const box = document.getElementById('summary');
+            try {
+                const flows = parseFlows(document.getElementById('flowInput').value);
+                if (!flows.length) { box.textContent = ''; return; }
+                const lines = flows.slice(0, 8).map(d => {
+                    const f = d.flow || d; const l4 = f.l4 || {}; const port = (l4.TCP || l4.UDP || {}).destination_port;
+                    const names = (f.destination_names || []).join(',');
+                    return (f.traffic_direction || '?') + ' ' + (f.verdict || '') + ' ' + who(f.source) + ' → ' + (names || who(f.destination)) + ':' + (port || '?') + (f.is_reply ? ' (reply — will be refused)' : '');
+                });
+                box.textContent = flows.length + ' flow(s) parsed: ' + lines.join(' | ') + (flows.length > 8 ? ' | …' : '');
+            } catch (e) { box.textContent = 'Not valid JSON yet: ' + e.message; }
+        }
+        let lastYAML = '', lastFilename = 'ciliumnetworkpolicy.yaml';
         async function generatePolicy() {
             const input = document.getElementById('flowInput').value;
-            const result = document.getElementById('result');
-            
+            const result = document.getElementById('result'); const apply = document.getElementById('apply');
+            const name = document.getElementById('policyName').value.trim();
+            const url = '/generate' + (name ? '?name=' + encodeURIComponent(name) : '');
             try {
-                const response = await fetch('/generate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: input
-                });
-                
-                if (!response.ok) {
-                    const error = await response.text();
-                    result.textContent = 'Error: ' + error;
-                    return;
-                }
-
-                const contentType = response.headers.get('Content-Type');
-                
-                if (contentType && contentType.includes('application/json')) {
-                    // JSON response with download URL
-                    const data = await response.json();
-                    result.textContent = 'Policy generated! Downloading...';
-                    
-                    // Open download URL
-                    window.open(data.download_url, '_blank');
-                } else {
-                    // Direct YAML response
-                    const yaml = await response.text();
-                    result.textContent = yaml;
-                    
-                    // Extract filename from Content-Disposition header or parse from YAML
-                    let filename = 'ciliumnetworkpolicy.yaml';
-                    const disposition = response.headers.get('Content-Disposition');
-                    if (disposition) {
-                        const match = disposition.match(/filename="?([^"]+)"?/);
-                        if (match) {
-                            filename = match[1];
-                        }
-                    } else {
-                        // Fallback: extract name from YAML metadata
-                        const nameMatch = yaml.match(/^\s*name:\s*(.+)$/m);
-                        const nsMatch = yaml.match(/^\s*namespace:\s*(.+)$/m);
-                        if (nameMatch) {
-                            const name = nameMatch[1].trim();
-                            const ns = nsMatch ? nsMatch[1].trim() : '';
-                            filename = ns ? ns + '-' + name + '.yaml' : name + '.yaml';
-                        }
-                    }
-                    
-                    const blob = new Blob([yaml], { type: 'application/x-yaml' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = filename;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                }
-            } catch (err) {
-                result.textContent = 'Error: ' + err.message;
-            }
+                const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: input });
+                if (!response.ok) { result.textContent = 'Error: ' + await response.text(); apply.textContent = ''; setButtons(false); return; }
+                const data = await response.json();
+                lastYAML = data.yaml; lastFilename = data.filename; result.textContent = data.yaml;
+                apply.textContent = data.flows + ' flow(s) → ' + data.policies + (data.policies === 1 ? ' policy' : ' policies') + '. Review it, then: kubectl apply -f ' + data.filename;
+                setButtons(true);
+            } catch (err) { result.textContent = 'Error: ' + err.message; setButtons(false); }
+        }
+        function setButtons(on) { document.getElementById('copyBtn').disabled = !on; document.getElementById('downloadBtn').disabled = !on; }
+        async function copyYAML() {
+            try { await navigator.clipboard.writeText(lastYAML); flash('copyBtn', 'Copied'); }
+            catch (e) { flash('copyBtn', 'Copy failed'); }
+        }
+        function downloadYAML() {
+            const blob = new Blob([lastYAML], { type: 'application/x-yaml' }); const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = lastFilename; a.click(); URL.revokeObjectURL(url);
+        }
+        function flash(id, text) { const b = document.getElementById(id); const old = b.textContent; b.textContent = text; setTimeout(() => b.textContent = old, 1200); }
+        function clearAll() { document.getElementById('flowInput').value = ''; document.getElementById('policyName').value = ''; document.getElementById('result').textContent = ''; document.getElementById('summary').textContent = ''; document.getElementById('apply').textContent = ''; setButtons(false); }
+        function loadExample() {
+            const ex = (src, uuid) => JSON.stringify({ flow: { uuid: uuid, verdict: 'AUDIT', IP: { source: '10.0.1.3', destination: '10.0.2.7', ipVersion: 'IPv4' },
+                l4: { TCP: { source_port: 45248, destination_port: 80, flags: { SYN: true } } },
+                source: { namespace: 'shop', labels: ['k8s:app.kubernetes.io/name=' + src, 'k8s:io.kubernetes.pod.namespace=shop'], pod_name: src },
+                destination: { namespace: 'shop', labels: ['k8s:app.kubernetes.io/name=shop', 'k8s:io.kubernetes.pod.namespace=shop'], pod_name: 'shop-6d7d797759-4ddlt' },
+                Type: 'L3_L4', traffic_direction: 'INGRESS', is_reply: false } });
+            document.getElementById('flowInput').value = ex('pos', '11111111-1111-4111-8111-111111111111') + '\n' + ex('checkout', '22222222-2222-4222-8222-222222222222') + '\n';
+            summarize();
         }
     </script>
 </body>
@@ -420,27 +538,26 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the flow
-	parsedFlow, err := flow.ParseFlowFromBytes(body)
+	// Parse the flows: one object, a JSON array, or one object per line (`hubble observe -o json`)
+	parsedFlows, err := flow.ParseFlowsFromBytes(body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to parse flow JSON: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Aggregate flows (even though we have just one)
-	flows := []*flow.ParsedFlow{parsedFlow}
-	aggregatedFlows := aggregator.AggregateFlows(flows)
-
+	aggregatedFlows := aggregator.AggregateFlows(parsedFlows)
 	if len(aggregatedFlows) == 0 {
 		http.Error(w, "No valid flows found in request", http.StatusBadRequest)
 		return
 	}
 
-	// Generate policy YAML
 	generator := policy.NewGenerator("")
-	yamlBytes, err := generator.GeneratePoliciesYAML(aggregatedFlows)
+	if name := strings.TrimSpace(r.URL.Query().Get("name")); name != "" {
+		generator = generator.WithName(name)
+	}
+	policies, yamlBytes, err := generator.GeneratePoliciesWithYAML(aggregatedFlows)
 	if err != nil {
-		if errors.Is(err, policy.ErrReplyFlow) {
+		if errors.Is(err, policy.ErrReplyFlow) || errors.Is(err, policy.ErrNameNeedsOnePolicy) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -448,71 +565,21 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine filename from policy
-	filename := "ciliumnetworkpolicy.yaml"
-	if len(aggregatedFlows) > 0 {
-		agg := aggregatedFlows[0]
-		var namespace, appName string
-		if agg.Direction == "INGRESS" {
-			namespace = agg.DestNamespace
-			appName = getAppName(agg.DestLabels)
-		} else {
-			namespace = agg.SourceNamespace
-			appName = getAppName(agg.SourceLabels)
-		}
-		if namespace != "" && appName != "" {
-			filename = fmt.Sprintf("%s-%s.yaml", namespace, sanitizeName(appName))
-		}
+	// One policy is named after it; several get one file that holds them all
+	filename := fmt.Sprintf("ciliumnetworkpolicies-%d.yaml", len(policies))
+	if len(policies) == 1 && policies[0].Metadata.Namespace != "" && policies[0].Metadata.Name != "" {
+		filename = fmt.Sprintf("%s-%s.yaml", policies[0].Metadata.Namespace, sanitizeName(policies[0].Metadata.Name))
 	}
 
-	// Check if request comes from Grafana or wants JSON response
-	acceptHeader := r.Header.Get("Accept")
-	grafanaAction := r.Header.Get("X-Grafana-Action")
-	wantsJSON := strings.Contains(acceptHeader, "application/json") || grafanaAction != ""
-
-	if wantsJSON {
-		// Use flow UUID as cache ID, fallback to generated ID if empty
-		id := parsedFlow.UUID
-		if id == "" {
-			id = generateID()
-		}
-
-		s.mu.Lock()
-		s.cache[id] = &CachedPolicy{
-			Content:   yamlBytes,
-			Filename:  filename,
-			CreatedAt: time.Now(),
-		}
-		s.mu.Unlock()
-
-		// Build download URL
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		host := r.Host
-		downloadURL := fmt.Sprintf("%s://%s/download/%s", scheme, host, id)
-
-		// Return JSON response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		response := map[string]string{
-			"filename":     filename,
-			"download_url": downloadURL,
-			"message":      "Policy generated successfully. Use the download_url to download the file.",
-		}
-		json.NewEncoder(w).Encode(response)
-
-		log.Printf("Generated policy (cached): %s, download: %s", filename, downloadURL)
-	} else {
-		// Direct file download for curl/wget
-		w.Header().Set("Content-Type", "application/x-yaml")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-		w.WriteHeader(http.StatusOK)
-		w.Write(yamlBytes)
-
-		log.Printf("Generated policy (direct): %s", filename)
+	// The cache key is the flow's UUID for a single flow (Grafana's Download link is built from it), else random
+	id := ""
+	if len(parsedFlows) == 1 {
+		id = parsedFlows[0].UUID
 	}
+	if id == "" {
+		id = generateID()
+	}
+	s.respond(w, r, id, yamlBytes, filename, "Policy generated successfully. Use the download_url to download the file.", len(parsedFlows), len(policies))
 }
 
 // handleYoloNs handles the YOLO namespace easter egg
@@ -534,80 +601,7 @@ func (s *Server) handleYoloNs(w http.ResponseWriter, r *http.Request, bodyStr st
 	}
 
 	filename := fmt.Sprintf("%s-yolo-allow-all-in-namespace.yaml", namespace)
-
-	// Check if request comes from Grafana or wants JSON response
-	acceptHeader := r.Header.Get("Accept")
-	grafanaAction := r.Header.Get("X-Grafana-Action")
-	wantsJSON := strings.Contains(acceptHeader, "application/json") || grafanaAction != ""
-
-	if wantsJSON {
-		id := generateID()
-
-		s.mu.Lock()
-		s.cache[id] = &CachedPolicy{
-			Content:   yamlBytes,
-			Filename:  filename,
-			CreatedAt: time.Now(),
-		}
-		s.mu.Unlock()
-
-		// Build download URL
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		host := r.Host
-		downloadURL := fmt.Sprintf("%s://%s/download/%s", scheme, host, id)
-
-		// Return JSON response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		response := map[string]string{
-			"filename":     filename,
-			"download_url": downloadURL,
-			"message":      "YOLO! Policy generated. Use the download_url to download the file.",
-		}
-		json.NewEncoder(w).Encode(response)
-
-		log.Printf("Generated YOLO policy (cached): %s, download: %s", filename, downloadURL)
-	} else {
-		// Direct file download
-		w.Header().Set("Content-Type", "application/x-yaml")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-		w.WriteHeader(http.StatusOK)
-		w.Write(yamlBytes)
-
-		log.Printf("Generated YOLO policy (direct): %s", filename)
-	}
-}
-
-// getAppName extracts the application name from labels
-func getAppName(labels map[string]string) string {
-	// Priority order for app name
-	priorityLabels := []string{
-		"app.kubernetes.io/name",
-		"app.kubernetes.io/instance",
-		"app.kubernetes.io/component",
-	}
-	fallbackLabels := []string{
-		"app",
-		"k8s-app",
-		"name",
-		"component",
-		"instance",
-	}
-
-	for _, label := range priorityLabels {
-		if name, ok := labels[label]; ok {
-			return name
-		}
-	}
-	for _, label := range fallbackLabels {
-		if name, ok := labels[label]; ok {
-			return name
-		}
-	}
-	return "policy"
+	s.respond(w, r, generateID(), yamlBytes, filename, "YOLO! Policy generated. Use the download_url to download the file.", 0, 1)
 }
 
 // sanitizeName ensures the name is valid for filenames

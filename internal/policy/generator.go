@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/hubble-policy-gen/internal/aggregator"
@@ -17,9 +18,13 @@ import (
 // ErrReplyFlow is returned when attempting to generate a policy for a reply flow
 var ErrReplyFlow = errors.New("this is a reply packet - you need to allow the original request, not the reply (Cilium's connection tracking automatically allows replies)")
 
+// ErrNameNeedsOnePolicy is returned when a name override is requested but the flows produce more than one policy
+var ErrNameNeedsOnePolicy = errors.New("a policy name can only be set when the flows produce a single policy")
+
 // Generator generates CiliumNetworkPolicies from aggregated flows
 type Generator struct {
-	outputDir string
+	outputDir    string
+	nameOverride string
 }
 
 // NewGenerator creates a new policy generator
@@ -27,42 +32,18 @@ func NewGenerator(outputDir string) *Generator {
 	return &Generator{outputDir: outputDir}
 }
 
-// GeneratePolicies generates CiliumNetworkPolicy files from aggregated flows
-func (g *Generator) GeneratePolicies(flows []*aggregator.AggregatedFlow) error {
-	// Check if all flows are reply flows
-	allReplies := true
-	for _, f := range flows {
-		if !f.IsReply {
-			allReplies = false
-			break
-		}
-	}
-	if allReplies && len(flows) > 0 {
-		return ErrReplyFlow
-	}
-
-	for _, f := range flows {
-		// Skip reply flows with a message
-		if f.IsReply {
-			fmt.Printf("Skipping reply flow: %s\n", ErrReplyFlow.Error())
-			continue
-		}
-		policy := g.GeneratePolicy(f)
-		needsCIDRComment := f.IsWorldTraffic && len(f.DestFQDNs) == 0
-		if err := g.writePolicyWithComment(policy, needsCIDRComment); err != nil {
-			return err
-		}
-	}
-	return nil
+// WithName makes the generator name the (single) resulting policy as given, sanitized for Kubernetes.
+// Without it a policy is named after the workload it selects, so two flows to the same workload from
+// different peers produce two objects with the same name — the second applied replaces the first.
+func (g *Generator) WithName(name string) *Generator {
+	g.nameOverride = sanitizeK8sName(name)
+	return g
 }
 
-// GeneratePoliciesYAML generates CiliumNetworkPolicy YAML from aggregated flows and returns as bytes
-func (g *Generator) GeneratePoliciesYAML(flows []*aggregator.AggregatedFlow) ([]byte, error) {
-	var buf bytes.Buffer
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2)
-
-	// Check if all flows are reply flows
+// BuildPolicies turns aggregated flows into policies: one per flow, then flows that select the same
+// workload (same namespace, name and endpointSelector) are merged into one object carrying every
+// rule. Reply flows are skipped; if every flow is a reply, ErrReplyFlow is returned.
+func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*CiliumNetworkPolicy, error) {
 	allReplies := true
 	for _, f := range flows {
 		if !f.IsReply {
@@ -74,32 +55,186 @@ func (g *Generator) GeneratePoliciesYAML(flows []*aggregator.AggregatedFlow) ([]
 		return nil, ErrReplyFlow
 	}
 
-	policyCount := 0
+	var policies []*CiliumNetworkPolicy
 	for _, f := range flows {
-		// Skip reply flows
 		if f.IsReply {
 			continue
 		}
+		policies = append(policies, g.GeneratePolicy(f))
+	}
+	policies = MergePolicies(policies)
 
-		policy := g.GeneratePolicy(f)
-		if policyCount > 0 {
+	if g.nameOverride != "" {
+		if len(policies) != 1 {
+			return nil, fmt.Errorf("%w: got %d", ErrNameNeedsOnePolicy, len(policies))
+		}
+		policies[0].Metadata.Name = g.nameOverride
+	}
+	return policies, nil
+}
+
+// MergePolicies folds policies that select the same workload into one, in first-seen order. Two
+// generated policies are "the same workload" when namespace, name and endpointSelector match; their
+// ingress and egress rules are concatenated, an identical rule (the DNS rule every FQDN policy
+// carries) is kept once, and the description says how many observed flows the object now covers.
+func MergePolicies(policies []*CiliumNetworkPolicy) []*CiliumNetworkPolicy {
+	var order []string
+	byKey := make(map[string]*CiliumNetworkPolicy)
+	merged := make(map[string]int)
+	for _, p := range policies {
+		key := p.Metadata.Namespace + "/" + p.Metadata.Name + "/" + labelsKey(p.Spec.EndpointSelector.MatchLabels)
+		existing, ok := byKey[key]
+		if !ok {
+			byKey[key] = p
+			order = append(order, key)
+			continue
+		}
+		merged[key]++
+		for _, r := range p.Spec.Ingress {
+			if !containsIngress(existing.Spec.Ingress, r) {
+				existing.Spec.Ingress = append(existing.Spec.Ingress, r)
+			}
+		}
+		for _, r := range p.Spec.Egress {
+			if !containsEgress(existing.Spec.Egress, r) {
+				existing.Spec.Egress = append(existing.Spec.Egress, r)
+			}
+		}
+	}
+	result := make([]*CiliumNetworkPolicy, 0, len(order))
+	for _, key := range order {
+		p := byKey[key]
+		if n := merged[key]; n > 0 {
+			p.Spec.Description = mergedDescription(p, n+1)
+		}
+		result = append(result, p)
+	}
+	return result
+}
+
+func mergedDescription(p *CiliumNetworkPolicy, flows int) string {
+	var dir string
+	switch {
+	case len(p.Spec.Ingress) > 0 && len(p.Spec.Egress) > 0:
+		dir = "ingress and egress"
+	case len(p.Spec.Egress) > 0:
+		dir = "egress"
+	default:
+		dir = "ingress"
+	}
+	return fmt.Sprintf("Allow %s traffic for the %s in %s (%d rules merged from %d observed flows)",
+		dir, p.Metadata.Name, p.Metadata.Namespace, len(p.Spec.Ingress)+len(p.Spec.Egress), flows)
+}
+
+func labelsKey(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(labels[k])
+		b.WriteByte(',')
+	}
+	return b.String()
+}
+
+func containsIngress(rules []IngressRule, r IngressRule) bool {
+	want := mustYAML(r)
+	for _, have := range rules {
+		if mustYAML(have) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEgress(rules []EgressRule, r EgressRule) bool {
+	want := mustYAML(r)
+	for _, have := range rules {
+		if mustYAML(have) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func mustYAML(v interface{}) string {
+	out, err := yaml.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%#v", v)
+	}
+	return string(out)
+}
+
+// hasCIDR reports whether a policy carries a toCIDR egress rule (the one that gets the world comment)
+func hasCIDR(p *CiliumNetworkPolicy) bool {
+	for _, r := range p.Spec.Egress {
+		if len(r.ToCIDR) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// GeneratePolicies generates CiliumNetworkPolicy files from aggregated flows — one file per workload
+// (flows selecting the same workload are merged, so a later one no longer overwrites an earlier file)
+func (g *Generator) GeneratePolicies(flows []*aggregator.AggregatedFlow) error {
+	policies, err := g.BuildPolicies(flows)
+	if err != nil {
+		return err
+	}
+	for _, p := range policies {
+		if err := g.writePolicyWithComment(p, hasCIDR(p)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GeneratePoliciesYAML generates CiliumNetworkPolicy YAML from aggregated flows and returns it as bytes
+func (g *Generator) GeneratePoliciesYAML(flows []*aggregator.AggregatedFlow) ([]byte, error) {
+	_, out, err := g.GeneratePoliciesWithYAML(flows)
+	return out, err
+}
+
+// GeneratePoliciesWithYAML returns the policies and their YAML (one document per policy, separated by ---)
+func (g *Generator) GeneratePoliciesWithYAML(flows []*aggregator.AggregatedFlow) ([]*CiliumNetworkPolicy, []byte, error) {
+	policies, err := g.BuildPolicies(flows)
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := EncodePolicies(policies)
+	if err != nil {
+		return nil, nil, err
+	}
+	return policies, out, nil
+}
+
+// EncodePolicies renders policies as a multi-document YAML stream with the world/CIDR comment where it applies
+func EncodePolicies(policies []*CiliumNetworkPolicy) ([]byte, error) {
+	var buf bytes.Buffer
+	for i, p := range policies {
+		if i > 0 {
 			buf.WriteString("---\n")
 		}
-		if err := encoder.Encode(policy); err != nil {
+		var one bytes.Buffer
+		encoder := yaml.NewEncoder(&one)
+		encoder.SetIndent(2)
+		if err := encoder.Encode(p); err != nil {
 			return nil, fmt.Errorf("failed to encode policy to YAML: %w", err)
 		}
-		
-		// Add comment for world traffic (toCIDR)
-		if f.IsWorldTraffic && len(f.DestFQDNs) == 0 {
-			addToCIDRComment(&buf)
+		if err := encoder.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close YAML encoder: %w", err)
 		}
-		policyCount++
+		if hasCIDR(p) {
+			addToCIDRComment(&one)
+		}
+		buf.Write(one.Bytes())
 	}
-
-	if err := encoder.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close YAML encoder: %w", err)
-	}
-
 	return buf.Bytes(), nil
 }
 

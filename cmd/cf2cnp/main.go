@@ -15,6 +15,7 @@ var (
 	inputDir      string
 	outputDir     string
 	port          int
+	externalURL   string
 	yoloNamespace string
 )
 
@@ -56,12 +57,19 @@ or use the 'serve' command to run as an HTTP server.`,
 and returns CiliumNetworkPolicy YAML files.
 
 Endpoints:
-  POST /generate - Send flow JSON, receive policy YAML
-  GET  /health   - Health check endpoint
-  GET  /         - Web UI for testing`,
+  POST /generate      - Send flow JSON (one flow, a JSON array, or one flow per line), receive policy YAML;
+                        with Accept: application/json, receive {download_url, filename, yaml, flows, policies}.
+                        ?name=<policy name> names the (single) resulting policy.
+  GET  /download/{id} - Download a generated policy (cached 10 minutes)
+  GET  /health        - Health check endpoint
+  GET  /              - Web UI`,
 		RunE: runServe,
 	}
 	serveCmd.Flags().IntVarP(&port, "port", "p", 8080, "Port to listen on")
+	serveCmd.Flags().StringVar(&externalURL, "external-url", os.Getenv("CF2CNP_EXTERNAL_URL"),
+		"Base URL clients reach the server at (e.g. https://cf2cnp.example.com); used for download_url. "+
+			"Default: derived from the request and its Forwarded / X-Forwarded-Proto / X-Forwarded-Host headers. "+
+			"Env: CF2CNP_EXTERNAL_URL")
 
 	// YOLO command (easter egg)
 	yoloCmd := &cobra.Command{
@@ -144,6 +152,6 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	srv := server.NewServer(port)
+	srv := server.NewServer(port, externalURL)
 	return srv.Start()
 }
