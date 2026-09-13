@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,6 +183,24 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 	} else if flow.L4.UDP != nil {
 		parsed.Protocol = "UDP"
 		parsed.Port = flow.L4.UDP.DestinationPort
+	}
+
+	// Layer 7 (E2): only REQUEST records describe what the client asked for; a RESPONSE is the reply
+	// side, skipped like is_reply. A request carries either http or dns.
+	if flow.L7 != nil && flow.L7.Type == "REQUEST" {
+		if flow.L7.HTTP != nil && flow.L7.HTTP.URL != "" {
+			parsed.HTTPMethod = flow.L7.HTTP.Method
+			if u, err := url.Parse(flow.L7.HTTP.URL); err == nil {
+				parsed.HTTPPath = u.Path
+			}
+		}
+		if flow.L7.DNS != nil {
+			// The query exactly as the resolver sent it, trailing dot removed. A search-list expansion
+			// (accounts.bank.svc.cluster.local.bank.svc.cluster.local — ndots:5) is kept on purpose: an L7 DNS
+			// policy allows ONLY the names it lists ("No other DNS queries will be allowed", layer7.rst), and
+			// the resolver tries the expansions before the real name — deny them and lookups fail.
+			parsed.DNSQuery = strings.TrimSuffix(flow.L7.DNS.Query, ".")
+		}
 	}
 
 	return parsed, nil

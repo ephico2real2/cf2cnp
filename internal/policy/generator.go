@@ -39,6 +39,56 @@ var ErrNameNeedsOnePolicy = errors.New("a policy name can only be set when the f
 type Generator struct {
 	outputDir    string
 	nameOverride string
+	l7           bool // E2: emit HTTP/DNS rules from the flows' l7 records
+}
+
+// WithL7 makes the generator write layer-7 rules (HTTP method+path, DNS names) where the flows carry
+// them. The port then goes through the node's Envoy proxy (cilium Documentation/security/policy/layer7.rst);
+// the caller opted in.
+func (g *Generator) WithL7() *Generator {
+	g.l7 = true
+	return g
+}
+
+// portRules builds the toPorts list for an aggregated flow. Without WithL7 (or without L7 records) it is
+// one port rule with every port, as before. With them, every port that carries L7 records gets its own
+// port rule with a rules: block, and the ports without stay together — an HTTP rule seen on 8080 must not
+// restrict 5432 of the same peer pair (review finding). Cilium's L7Rules is a union: one protocol per port.
+func (g *Generator) portRules(f *aggregator.AggregatedFlow) []PortRule {
+	if !g.l7 {
+		return []PortRule{{Ports: convertPorts(f.Ports)}}
+	}
+	var plain []aggregator.PortInfo
+	var rules []PortRule
+	for _, p := range f.Ports {
+		r := l7RulesFor(p)
+		if r == nil {
+			plain = append(plain, p)
+			continue
+		}
+		rules = append(rules, PortRule{Ports: convertPorts([]aggregator.PortInfo{p}), Rules: r})
+	}
+	if len(plain) > 0 {
+		rules = append([]PortRule{{Ports: convertPorts(plain)}}, rules...)
+	}
+	return rules
+}
+
+// l7RulesFor is the rules: block for one port, or nil when nothing was seen on it
+func l7RulesFor(p aggregator.PortInfo) *L7Rules {
+	if len(p.HTTPRequests) == 0 && len(p.DNSQueries) == 0 {
+		return nil
+	}
+	r := &L7Rules{}
+	for _, req := range p.HTTPRequests {
+		// Envoy matches the regex against the WHOLE :path header, which carries the query string too:
+		// the path is escaped, and an optional query is allowed — "/payments?x=1" is still /payments.
+		r.HTTP = append(r.HTTP, HTTPRule{Method: req.Method, Path: "^" + regexp.QuoteMeta(req.Path) + `(\?.*)?$`})
+	}
+	for _, q := range p.DNSQueries {
+		r.DNS = append(r.DNS, DNSRule{MatchName: q})
+	}
+	return r
 }
 
 // NewGenerator creates a new policy generator
@@ -314,9 +364,7 @@ func (g *Generator) generateEndpointIngressRules(policy *CiliumNetworkPolicy, f 
 	}
 
 	// Add port rules
-	ingressRule.ToPorts = []PortRule{
-		{Ports: convertPorts(f.Ports)},
-	}
+	ingressRule.ToPorts = g.portRules(f)
 
 	policy.Spec.Ingress = []IngressRule{ingressRule}
 }
@@ -334,9 +382,7 @@ func (g *Generator) generateEntityIngressRules(policy *CiliumNetworkPolicy, f *a
 	}
 
 	// Add port rules
-	ingressRule.ToPorts = []PortRule{
-		{Ports: convertPorts(f.Ports)},
-	}
+	ingressRule.ToPorts = g.portRules(f)
 
 	policy.Spec.Ingress = []IngressRule{ingressRule}
 }
@@ -386,9 +432,7 @@ func (g *Generator) generateFQDNEgressRules(policy *CiliumNetworkPolicy, f *aggr
 	}
 
 	// Add port rules
-	fqdnRule.ToPorts = []PortRule{
-		{Ports: convertPorts(f.Ports)},
-	}
+	fqdnRule.ToPorts = g.portRules(f)
 
 	// Second rule: DNS resolution (required for toFQDNs to work)
 	dnsRule := EgressRule{
@@ -405,7 +449,7 @@ func (g *Generator) generateFQDNEgressRules(policy *CiliumNetworkPolicy, f *aggr
 				Ports: []Port{
 					{Port: "53", Protocol: "UDP"},
 				},
-				Rules: &DNSRules{
+				Rules: &L7Rules{
 					DNS: []DNSRule{
 						{MatchPattern: "*"},
 					},
@@ -427,10 +471,8 @@ func (g *Generator) generateWorldEgressRules(policy *CiliumNetworkPolicy, f *agg
 
 	// Rule for CIDR-based world traffic
 	cidrRule := EgressRule{
-		ToCIDR: cidrs,
-		ToPorts: []PortRule{
-			{Ports: convertPorts(f.Ports)},
-		},
+		ToCIDR:  cidrs,
+		ToPorts: g.portRules(f),
 	}
 
 	policy.Spec.Egress = []EgressRule{cidrRule}
@@ -448,9 +490,7 @@ func (g *Generator) generateEntityEgressRules(policy *CiliumNetworkPolicy, f *ag
 		entityRule.ToEntities = []string{f.DestEntity}
 	}
 
-	entityRule.ToPorts = []PortRule{
-		{Ports: convertPorts(f.Ports)},
-	}
+	entityRule.ToPorts = g.portRules(f)
 
 	policy.Spec.Egress = []EgressRule{entityRule}
 }
@@ -476,9 +516,7 @@ func (g *Generator) generateEndpointEgressRules(policy *CiliumNetworkPolicy, f *
 	}
 
 	// Add port rules
-	egressRule.ToPorts = []PortRule{
-		{Ports: convertPorts(f.Ports)},
-	}
+	egressRule.ToPorts = g.portRules(f)
 
 	policy.Spec.Egress = []EgressRule{egressRule}
 }

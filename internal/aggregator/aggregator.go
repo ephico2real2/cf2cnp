@@ -28,10 +28,19 @@ type AggregatedFlow struct {
 	IsReply             bool              // True if this is a reply packet
 }
 
-// PortInfo represents a port and protocol combination
+// HTTPRequest is one distinct method + path seen on a peer pair (E2)
+type HTTPRequest struct {
+	Method string
+	Path   string
+}
+
+// PortInfo represents a port and protocol combination, with the layer-7 records seen on it (E2). L7 is
+// per port: a rules: block on one port must not restrict another port of the same peer pair (review finding).
 type PortInfo struct {
-	Port     int
-	Protocol string
+	Port         int
+	Protocol     string
+	HTTPRequests []HTTPRequest // distinct method+path seen on this port
+	DNSQueries   []string      // distinct names queried on this port
 }
 
 // AggregateFlows groups flows by source/destination and aggregates ports
@@ -58,6 +67,7 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 			if f.DestIP != "" && !containsString(existing.DestIPs, f.DestIP) {
 				existing.DestIPs = append(existing.DestIPs, f.DestIP)
 			}
+			addL7(existing, f)
 		} else {
 			// Create new aggregated flow
 			var destIPs []string
@@ -82,6 +92,7 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 				IsDestEntityTraffic: f.IsDestEntityTraffic,
 				IsReply:             f.IsReply,
 			}
+			addL7(aggregated, f)
 			aggregationMap[key] = aggregated
 		}
 	}
@@ -108,6 +119,38 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 	})
 
 	return result
+}
+
+// addL7 records the flow's layer-7 records on ITS port of the aggregated flow (E2)
+func addL7(agg *AggregatedFlow, f *flow.ParsedFlow) {
+	if f.HTTPMethod == "" && f.HTTPPath == "" && f.DNSQuery == "" {
+		return
+	}
+	for i := range agg.Ports {
+		p := &agg.Ports[i]
+		if p.Port != f.Port || p.Protocol != f.Protocol {
+			continue
+		}
+		if f.HTTPMethod != "" || f.HTTPPath != "" {
+			r := HTTPRequest{Method: f.HTTPMethod, Path: f.HTTPPath}
+			if !containsRequest(p.HTTPRequests, r) {
+				p.HTTPRequests = append(p.HTTPRequests, r)
+			}
+		}
+		if f.DNSQuery != "" && !containsString(p.DNSQueries, f.DNSQuery) {
+			p.DNSQueries = append(p.DNSQueries, f.DNSQuery)
+		}
+		return
+	}
+}
+
+func containsRequest(reqs []HTTPRequest, r HTTPRequest) bool {
+	for _, have := range reqs {
+		if have == r {
+			return true
+		}
+	}
+	return false
 }
 
 // generateAggregationKey creates a unique key for grouping flows

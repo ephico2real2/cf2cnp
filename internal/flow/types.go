@@ -25,6 +25,28 @@ type Flow struct {
 	TrafficDirection string    `json:"traffic_direction"`
 	IsReply          bool      `json:"is_reply"`
 	Summary          string    `json:"Summary"`
+	L7               *L7       `json:"l7,omitempty"`
+}
+
+// L7 is Hubble's layer-7 record on a flow, present once a visibility or L7 policy put the port on the proxy
+type L7 struct {
+	Type string  `json:"type"` // REQUEST or RESPONSE
+	HTTP *L7HTTP `json:"http,omitempty"`
+	DNS  *L7DNS  `json:"dns,omitempty"`
+}
+
+// L7HTTP is the http part of an L7 record (url is a full URL; code is set on responses)
+type L7HTTP struct {
+	Method   string `json:"method"`
+	URL      string `json:"url"`
+	Protocol string `json:"protocol"`
+	Code     int    `json:"code,omitempty"`
+}
+
+// L7DNS is the dns part of an L7 record (query carries a trailing dot)
+type L7DNS struct {
+	Query  string   `json:"query"`
+	Qtypes []string `json:"qtypes,omitempty"`
 }
 
 // Ethernet contains MAC address information
@@ -111,4 +133,7 @@ type ParsedFlow struct {
 	IsWorldTraffic      bool              // True if destination is "world"
 	IsDestEntityTraffic bool              // True if destination is a reserved entity
 	IsReply             bool              // True if this is a reply packet
+	HTTPMethod          string            // E2: l7.http.method of a REQUEST record
+	HTTPPath            string            // E2: the path of l7.http.url of a REQUEST record
+	DNSQuery            string            // E2: l7.dns.query of a REQUEST record, without the trailing dot
 }

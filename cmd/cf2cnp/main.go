@@ -16,6 +16,7 @@ var (
 	outputDir     string
 	port          int
 	externalURL   string
+	l7            bool
 	yoloNamespace string
 )
 
@@ -46,6 +47,7 @@ or use the 'serve' command to run as an HTTP server.`,
 	}
 	generateCmd.Flags().StringVarP(&inputDir, "input", "i", "", "Input directory containing Hubble flow JSON files (required)")
 	generateCmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory for generated CiliumNetworkPolicy YAML files (required)")
+	generateCmd.Flags().BoolVar(&l7, "l7", false, "Emit layer-7 rules (HTTP method+path, DNS names) from the flows' l7 records; the port then goes through the proxy")
 	generateCmd.MarkFlagRequired("input")
 	generateCmd.MarkFlagRequired("output")
 
@@ -143,6 +145,9 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 
 	// Generate policies
 	generator := policy.NewGenerator(outputDir)
+	if l7 {
+		generator = generator.WithL7()
+	}
 	if err := generator.GeneratePolicies(aggregatedFlows); err != nil {
 		return fmt.Errorf("failed to generate policies: %w", err)
 	}
