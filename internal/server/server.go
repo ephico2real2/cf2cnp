@@ -452,7 +452,12 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             if (!ep) return '?';
             const labels = ep.labels || [];
             const pick = (k) => { const l = labels.find(x => x.startsWith('k8s:' + k + '=')); return l ? l.split('=')[1] : null; };
-            return pick('app.kubernetes.io/name') || pick('app') || pick('k8s-app') || ep.pod_name || (labels.find(x => x.startsWith('reserved:')) || '?').replace('reserved:', '');
+            // the same identity the policy name is built from: name, then instance and component when present
+            var name = pick('app.kubernetes.io/name') || pick('app') || pick('k8s-app') || ep.pod_name || (labels.find(x => x.startsWith('reserved:')) || '?').replace('reserved:', '');
+            var inst = pick('app.kubernetes.io/instance'), comp = pick('app.kubernetes.io/component');
+            if (inst && inst !== name) name += '/' + inst;
+            if (comp && comp !== name) name += '/' + comp;
+            return name;
         }
         function summarize() {
             const box = document.getElementById('summary');
