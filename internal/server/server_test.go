@@ -203,3 +203,26 @@ func TestYolo_JSONUsesBaseURL(t *testing.T) {
 		t.Fatalf("%v", m)
 	}
 }
+
+// E4: ?exclude=key=value drops the flows whose peer carries it; the peer is the source for INGRESS
+func TestGenerate_ExcludePeers(t *testing.T) {
+	s := NewServer(8080, "")
+	body := fixture(t, "ingress-pos-to-shop.json") + "\n" + fixture(t, "ingress-stranger-to-shop.json")
+	rec := post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dstranger", body, nil)
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), "stranger") || !strings.Contains(rec.Body.String(), "pos") {
+		t.Fatalf("stranger must be gone, pos kept: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dnobody", body, nil)
+	if rec.Code != 200 || strings.Count(rec.Body.String(), "fromEndpoints") != 2 {
+		t.Fatalf("an exclude that matches nothing changes nothing: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dpos&exclude=app.kubernetes.io%2Fname%3Dstranger", body, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("everything excluded must be a 400, got %d", rec.Code)
+	}
+	// EGRESS: the peer is the destination; excluding the source does nothing
+	rec = post(t, s, "/generate?exclude=app.kubernetes.io%2Fname%3Dpos", fixture(t, "egress-pos-to-world.json"), nil)
+	if rec.Code != 200 {
+		t.Fatalf("egress flow: the source is not the peer, got %d", rec.Code)
+	}
+}
