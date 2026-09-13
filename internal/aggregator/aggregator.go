@@ -13,10 +13,12 @@ type AggregatedFlow struct {
 	Direction           string            // INGRESS or EGRESS
 	SourceNamespace     string            // Source pod namespace
 	SourceLabels        map[string]string // Filtered source labels
+	SourceCluster       string            // ClusterMesh: the source's cluster (E1)
 	SourceEntity        string            // Reserved entity for source (remote-node, host, etc.)
 	IsSourceEntity      bool              // True if source is a reserved entity
 	DestNamespace       string            // Destination pod namespace
 	DestLabels          map[string]string // Filtered destination labels
+	DestCluster         string            // ClusterMesh: the destination's cluster (E1)
 	DestFQDNs           []string          // Destination FQDNs for world traffic
 	DestIPs             []string          // Destination IPs for CIDR-based rules
 	DestEntity          string            // Reserved entity (kube-apiserver, host, world, etc.)
@@ -66,10 +68,12 @@ func AggregateFlows(flows []*flow.ParsedFlow) []*AggregatedFlow {
 				Direction:           f.Direction,
 				SourceNamespace:     f.SourceNamespace,
 				SourceLabels:        copyLabels(f.SourceLabels),
+				SourceCluster:       f.SourceCluster,
 				SourceEntity:        f.SourceEntity,
 				IsSourceEntity:      f.IsSourceEntity,
 				DestNamespace:       f.DestNamespace,
 				DestLabels:          copyLabels(f.DestLabels),
+				DestCluster:         f.DestCluster,
 				DestFQDNs:           append([]string{}, f.DestFQDNs...),
 				DestIPs:             destIPs,
 				DestEntity:          f.DestEntity,
@@ -112,6 +116,7 @@ func generateAggregationKey(f *flow.ParsedFlow) string {
 	parts = append(parts, f.Direction)
 	parts = append(parts, f.SourceNamespace)
 	parts = append(parts, labelsToString(f.SourceLabels))
+	parts = append(parts, f.SourceCluster) // a peer in another cluster is another peer (E1)
 
 	// Include source entity in key for entity-based traffic
 	if f.IsSourceEntity {
@@ -120,6 +125,7 @@ func generateAggregationKey(f *flow.ParsedFlow) string {
 
 	parts = append(parts, f.DestNamespace)
 	parts = append(parts, labelsToString(f.DestLabels))
+	parts = append(parts, f.DestCluster)
 
 	// Include destination entity in key for entity-based traffic
 	if f.IsDestEntityTraffic {
@@ -190,10 +196,12 @@ func parsedFlowFromAggregated(agg *AggregatedFlow) *flow.ParsedFlow {
 		Direction:           agg.Direction,
 		SourceNamespace:     agg.SourceNamespace,
 		SourceLabels:        agg.SourceLabels,
+		SourceCluster:       agg.SourceCluster,
 		SourceEntity:        agg.SourceEntity,
 		IsSourceEntity:      agg.IsSourceEntity,
 		DestNamespace:       agg.DestNamespace,
 		DestLabels:          agg.DestLabels,
+		DestCluster:         agg.DestCluster,
 		DestFQDNs:           agg.DestFQDNs,
 		DestEntity:          agg.DestEntity,
 		IsWorldTraffic:      agg.IsWorldTraffic,
