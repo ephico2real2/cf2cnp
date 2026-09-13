@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -180,6 +181,21 @@ func validHost(v string) string {
 	return v
 }
 
+// bearerToken returns the credentials of an Authorization header whose scheme is "Bearer" (any case), else ""
+func bearerToken(header string) string {
+	parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+// tokensEqual compares two secrets in constant time regardless of their lengths
+func tokensEqual(a, b string) bool {
+	ha, hb := sha256.Sum256([]byte(a)), sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+}
+
 // wantsJSON reports whether the client asked for the JSON answer (Grafana's action sets
 // X-Grafana-Action; any client may send Accept: application/json)
 func wantsJSON(r *http.Request) bool {
@@ -251,13 +267,15 @@ func (s *Server) allowedOrigin(origin string) string {
 	return ""
 }
 
-// requireToken checks Authorization: Bearer <token> when a token is configured (E6). Constant-time compare;
-// preflight (OPTIONS) is never challenged, or the browser cannot even ask.
+// requireToken checks Authorization: Bearer <token> when a token is configured (E6). The scheme is
+// case-insensitive as HTTP requires; the compare hashes both sides first, so its timing never depends on
+// where the tokens differ or on their lengths (ConstantTimeCompare returns at once on unequal lengths —
+// review finding). Preflight (OPTIONS) is never challenged, or the browser cannot even ask.
 func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.authToken != "" && r.Method != http.MethodOptions {
-			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(got), []byte(s.authToken)) != 1 {
+			got := bearerToken(r.Header.Get("Authorization"))
+			if !tokensEqual(got, s.authToken) {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="cf2cnp"`)
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return

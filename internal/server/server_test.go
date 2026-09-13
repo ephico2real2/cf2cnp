@@ -261,3 +261,20 @@ func TestAuthToken(t *testing.T) {
 		t.Fatalf("/health is open: %d", rec.Code)
 	}
 }
+
+// Review finding: the scheme is case-insensitive, and a wrong token of ANY length is refused the same way
+func TestAuthToken_SchemeCaseAndLengths(t *testing.T) {
+	s := NewServerWithOptions(8080, "", Options{AuthToken: "s3cret"})
+	flow := fixture(t, "ingress-pos-to-shop.json")
+	for header, want := range map[string]int{"bearer s3cret": 200, "BEARER s3cret": 200, "Bearer s3cret": 200, "Bearer s3cre": 401, "Bearer s3cret-and-more": 401, "Basic s3cret": 401, "": 401} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(flow))
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		s.corsMiddleware(s.requireToken(s.handleGenerate))(rec, req)
+		if rec.Code != want {
+			t.Fatalf("%q: got %d want %d", header, rec.Code, want)
+		}
+	}
+}
