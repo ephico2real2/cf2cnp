@@ -65,9 +65,11 @@ auth:
 # (reserved:host) and the endpoints listed, on the container port; egress to kube-dns only.
 networkPolicy:
   enabled: false
-  fromEndpoints:
-    - matchLabels:
-        app.kubernetes.io/name: grafana
+  # Extra callers besides the Gateway and the kubelet. The Grafana ACTION is a browser call that arrives through
+  # the Gateway (reserved:ingress), so nothing is needed for it. A pod in ANOTHER namespace needs the namespace
+  # label in its selector (review finding — a bare label matches the release namespace only), e.g.
+  #   - matchLabels: {app.kubernetes.io/name: grafana, io.kubernetes.pod.namespace: monitoring}
+  fromEndpoints: []
 
 # Extra arguments appended to `cf2cnp serve --port <containerPort>` (e.g. a flag this chart has no value for)
 extraArgs: []

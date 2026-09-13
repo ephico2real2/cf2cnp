@@ -35,7 +35,7 @@ The following table lists the configurable parameters of the CF2CNP chart and th
 | `externalURL` | Base URL clients reach cf2cnp at, for `download_url` (empty = derived from the request and its `Forwarded` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers) | `""` |
 | `cors.allowedOrigins` | Origins allowed by CORS (Grafana's, for the dashboard action); empty = any | `[]` |
 | `auth.token`, `auth.existingSecret` | A bearer token required on `/generate` and `/download` (a Secret with key `token` preferred) | `""`, `""` |
-| `networkPolicy.enabled`, `networkPolicy.fromEndpoints` | A CiliumNetworkPolicy for the pod: ingress from the Gateway and the listed endpoints, egress to kube-dns | `false`, Grafana's labels |
+| `networkPolicy.enabled`, `networkPolicy.fromEndpoints` | A CiliumNetworkPolicy for the pod: ingress from the Gateway (`reserved:ingress`), the kubelet (`reserved:host`) and the listed endpoints (add `io.kubernetes.pod.namespace` for another namespace), egress to kube-dns | `false`, `[]` |
 | `extraArgs` | Extra arguments appended to `cf2cnp serve --port <containerPort>` | `[]` |
 | `extraEnv` | Extra environment variables (`CF2CNP_EXTERNAL_URL` is an alternative to `externalURL`) | `[]` |
 | `ingress.enabled` | Enable ingress | `false` |
