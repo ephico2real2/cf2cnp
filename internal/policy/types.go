@@ -10,8 +10,9 @@ type CiliumNetworkPolicy struct {
 
 // Metadata contains policy metadata
 type Metadata struct {
-	Name      string `yaml:"name"`
-	Namespace string `yaml:"namespace"`
+	Name      string            `yaml:"name"`
+	Namespace string            `yaml:"namespace"`
+	Labels    map[string]string `yaml:"labels,omitempty"`
 }
 
 // Spec contains the policy specification
@@ -71,4 +72,3 @@ type DNSRule struct {
 	MatchPattern string `yaml:"matchPattern,omitempty"`
 	MatchName    string `yaml:"matchName,omitempty"`
 }
-

@@ -122,3 +122,57 @@ func TestEncodePolicies_MultiDocument(t *testing.T) {
 		t.Fatalf("expected two documents separated once:\n%s", out)
 	}
 }
+
+func mkIngress(ns, name, component, instance, peer string) *aggregator.AggregatedFlow {
+	dst := map[string]string{"app.kubernetes.io/name": name}
+	if component != "" {
+		dst["app.kubernetes.io/component"] = component
+	}
+	if instance != "" {
+		dst["app.kubernetes.io/instance"] = instance
+	}
+	return &aggregator.AggregatedFlow{Direction: "INGRESS", DestNamespace: ns, DestLabels: dst, SourceNamespace: ns,
+		SourceLabels: map[string]string{"app.kubernetes.io/name": peer}, Ports: []aggregator.PortInfo{{Port: 80, Protocol: "TCP"}}}
+}
+
+// Kubernetes identifies an object by group/kind/namespace/name: two workloads that differ only by component
+// or instance must not produce two objects with one name (the second apply replaces the first).
+func TestBuildPolicies_NameIsAFunctionOfTheSelector(t *testing.T) {
+	ps, err := NewGenerator("").BuildPolicies([]*aggregator.AggregatedFlow{
+		mkIngress("store", "shop", "frontend", "", "pos"), mkIngress("store", "shop", "backend", "", "pos"),
+		mkIngress("store", "shop", "", "", "pos"), mkIngress("store", "shop", "frontend", "blue", "pos"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, p := range ps {
+		key := p.Metadata.Namespace + "/" + p.Metadata.Name
+		if seen[key] {
+			t.Fatalf("two policies share %s", key)
+		}
+		seen[key] = true
+	}
+	want := map[string]bool{"store/shop-frontend": true, "store/shop-backend": true, "store/shop": true, "store/shop-blue-frontend": true}
+	for k := range want {
+		if !seen[k] {
+			t.Fatalf("expected %s among %v", k, seen)
+		}
+	}
+	for _, p := range ps {
+		if p.Metadata.Labels["app.kubernetes.io/managed-by"] != "cf2cnp" || p.Metadata.Labels["app.kubernetes.io/name"] != "shop" {
+			t.Fatalf("labels must carry managed-by and the selector's name: %v", p.Metadata.Labels)
+		}
+		if c := p.Spec.EndpointSelector.MatchLabels["app.kubernetes.io/component"]; c != "" && p.Metadata.Labels["app.kubernetes.io/component"] != c {
+			t.Fatalf("component label must be carried: %v", p.Metadata.Labels)
+		}
+	}
+}
+
+// A workload with only app.kubernetes.io/name keeps the name it always had
+func TestBuildPolicies_NameUnchangedWithoutComponent(t *testing.T) {
+	ps, _ := NewGenerator("").BuildPolicies(load(t, "ingress-pos-to-shop.json"))
+	if ps[0].Metadata.Name != "shop" {
+		t.Fatalf("got %s", ps[0].Metadata.Name)
+	}
+}

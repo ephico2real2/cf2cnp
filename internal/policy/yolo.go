@@ -58,4 +58,3 @@ func YOLONamespacePolicyYAML(namespace string) ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
-

@@ -259,6 +259,7 @@ func (g *Generator) generateIngressPolicy(policy *CiliumNetworkPolicy, f *aggreg
 	// For ingress, the destination is where the policy is applied
 	policy.Metadata.Namespace = f.DestNamespace
 	policy.Metadata.Name = generatePolicyName(f.DestLabels)
+	policy.Metadata.Labels = policyLabels(f.DestLabels)
 
 	// Generate description
 	policy.Spec.Description = g.generateDescription(f)
@@ -284,7 +285,7 @@ func (g *Generator) generateEndpointIngressRules(policy *CiliumNetworkPolicy, f 
 
 	// From endpoints with source labels
 	fromLabels := copyLabels(f.SourceLabels)
-	
+
 	// Add namespace label if cross-namespace traffic
 	if f.SourceNamespace != "" && f.SourceNamespace != f.DestNamespace {
 		fromLabels[flow.GetNamespaceLabel()] = f.SourceNamespace
@@ -327,6 +328,7 @@ func (g *Generator) generateEgressPolicy(policy *CiliumNetworkPolicy, f *aggrega
 	// For egress, the source is where the policy is applied
 	policy.Metadata.Namespace = f.SourceNamespace
 	policy.Metadata.Name = generatePolicyName(f.SourceLabels)
+	policy.Metadata.Labels = policyLabels(f.SourceLabels)
 
 	// Generate description
 	policy.Spec.Description = g.generateDescription(f)
@@ -357,7 +359,7 @@ func (g *Generator) generateEgressPolicy(policy *CiliumNetworkPolicy, f *aggrega
 func (g *Generator) generateFQDNEgressRules(policy *CiliumNetworkPolicy, f *aggregator.AggregatedFlow) {
 	// First rule: FQDN-based egress
 	fqdnRule := EgressRule{}
-	
+
 	// Add FQDN selectors
 	for _, fqdn := range f.DestFQDNs {
 		fqdnRule.ToFQDNs = append(fqdnRule.ToFQDNs, FQDNSelector{
@@ -492,12 +494,44 @@ func (g *Generator) generateDescription(f *aggregator.AggregatedFlow) string {
 	return fmt.Sprintf("Allow %s traffic %s for the %s", direction, fromTo, target)
 }
 
-// generatePolicyName creates a policy name from labels
+// generatePolicyName creates a policy name from the selector's labels. Kubernetes identifies an object by
+// group, kind, namespace and name, so two workloads that share app.kubernetes.io/name but differ by
+// instance or component (the recommended labels' own distinction: name = the application, instance =
+// one installation of it, component = one part of it) must not produce two objects with one name —
+// the second `kubectl apply` would replace the first, silently. The name is therefore a function of
+// EVERY identifying label the selector carries, in the order name, instance, component, so that equal
+// names imply equal selectors: "shop", "shop-frontend", "shop-blue-frontend".
 func generatePolicyName(labels map[string]string) string {
-	name := getAppName(labels)
-	// Sanitize the name for Kubernetes
-	name = sanitizeK8sName(name)
-	return name
+	parts := []string{getAppName(labels)}
+	for _, key := range []string{"app.kubernetes.io/instance", "app.kubernetes.io/component", "instance", "component"} {
+		v, ok := labels[key]
+		if !ok || v == "" {
+			continue
+		}
+		dup := false
+		for _, p := range parts {
+			if p == v {
+				dup = true
+			}
+		}
+		if !dup {
+			parts = append(parts, v)
+		}
+	}
+	return sanitizeK8sName(strings.Join(parts, "-"))
+}
+
+// policyLabels are the labels stamped on every generated policy: who generated it, and the selector's
+// identifying labels copied, so `kubectl get cnp -l app.kubernetes.io/name=shop` lists a workload's
+// policies whatever they are named.
+func policyLabels(selector map[string]string) map[string]string {
+	out := map[string]string{"app.kubernetes.io/managed-by": "cf2cnp"}
+	for _, key := range []string{"app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component"} {
+		if v, ok := selector[key]; ok && v != "" {
+			out[key] = v
+		}
+	}
+	return out
 }
 
 // getAppName extracts the application name from labels
@@ -611,30 +645,29 @@ func copyLabels(labels map[string]string) map[string]string {
 // addToCIDRComment inserts a comment after toCIDR in the YAML output
 func addToCIDRComment(buf *bytes.Buffer) {
 	content := buf.String()
-	
+
 	// Find toCIDR and toPorts to insert comment between them
 	toCIDRIdx := strings.LastIndex(content, "toCIDR:")
 	if toCIDRIdx == -1 {
 		return
 	}
-	
+
 	// Find toPorts after toCIDR
 	restContent := content[toCIDRIdx:]
 	toPortsIdx := strings.Index(restContent, "      toPorts:")
 	if toPortsIdx == -1 {
 		return
 	}
-	
+
 	// Calculate the actual position (right before the indentation of "toPorts:")
 	insertPos := toCIDRIdx + toPortsIdx
-	
+
 	// The comment should align with the list item when uncommented (4 spaces for the -)
 	toCIDRComment := "    # To allow all traffic to world instead of specific IPs, replace toCIDR with:\n    # - toEntities:\n    #     - world\n"
-	
+
 	// Insert the comment before toPorts
 	newContent := content[:insertPos] + toCIDRComment + content[insertPos:]
-	
+
 	buf.Reset()
 	buf.WriteString(newContent)
 }
-

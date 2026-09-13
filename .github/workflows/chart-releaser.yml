@@ -1,0 +1,32 @@
+name: Release Helm Chart (GitHub Pages)
+
+# Publishes helm/cf2cnp as a classic Helm repository on the gh-pages branch (index.yaml) and as a GitHub
+# release carrying the chart .tgz, whenever the chart version on the default branch changes. This is the
+# fork's release path while the upstream pull request is pending; the OCI push (helm-publish.yml) stays.
+on:
+  push:
+    branches: [develop, main]
+    paths: ['helm/**', '.github/workflows/chart-releaser.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+      - uses: azure/setup-helm@v4
+      - uses: helm/chart-releaser-action@v1.7.0
+        with:
+          charts_dir: helm
+          skip_existing: true
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
