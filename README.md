@@ -2,6 +2,9 @@
 
 A CLI tool that generates CiliumNetworkPolicies from Hubble flow data. This tool analyzes network traffic patterns captured by Hubble and automatically creates corresponding Cilium network policies.
 
+
+**Running-test captures.** cf2cnp runs on every CI run of a reference Cilium 1.20.1 lab (a two-cluster ClusterMesh on kind) and the results are captured — see the [`ci-captures` branch](https://github.com/ephico2real2/cilium-implementation-poc/tree/ci-captures) (newest run first): `cf2cnp.png` (the tool output), `grafana-policy-verdicts-cf2cnp-lab.png` (the generated policy under audit / enforce), `hubble-ui-cf2cnp-lab.png`.
+
 ## Features
 
 - **Automatic Policy Generation**: Reads Hubble flow JSON files and generates CiliumNetworkPolicy YAML files
