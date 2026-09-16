@@ -7,7 +7,7 @@ record where two independent reviewers (Cursor, Codex) went through the claims. 
 test summary on every push (the workflow's job summary): the unit tests by package, the 14 golden captures that must
 answer byte for byte, the CRD check, and `cf2cnp validate` over every golden output.
 
-## Unreleased
+## 0.9.0 — 2026-09-16 · every request and every refusal in the log; the download says which of three things happened
 
 - **Structured logging** on the HTTP server (`log/slog`, no extra library): `--log-format` (`text` / `json`, env
   `CF2CNP_LOG_FORMAT`) and `--log-level` (`debug` / `info` / `warn` / `error`, env `CF2CNP_LOG_LEVEL`); one `listening`
