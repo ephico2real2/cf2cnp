@@ -87,6 +87,12 @@ dns:
   profile: auto
   resolver: ""
 
+# text for a terminal, json for a container — the chart defaults to json
+logging:
+  format: json
+  # debug, info, warn, error; /health probes are logged at debug
+  level: info
+
 extraArgs: []
 
 # Extra environment variables for the container (list of EnvVar; CF2CNP_EXTERNAL_URL is an alternative to externalURL)

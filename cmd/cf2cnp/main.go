@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,8 @@ var (
 	// default was lost)
 	serveDNSProfile  string
 	serveDNSResolver string
+	logFormat        string
+	logLevel         string
 )
 
 func main() {
@@ -104,6 +107,10 @@ Endpoints:
 		"The DNS resolver profile a request gets when it omits ?dnsProfile= (see generate --dns-profile). Env: CF2CNP_DNS_PROFILE")
 	serveCmd.Flags().StringVar(&serveDNSResolver, "dns-resolver", os.Getenv("CF2CNP_DNS_RESOLVER"),
 		"The DNS resolver a request gets when it omits ?dnsResolver= (see generate --dns-resolver). Env: CF2CNP_DNS_RESOLVER")
+	serveCmd.Flags().StringVar(&logFormat, "log-format", envOr("CF2CNP_LOG_FORMAT", "text"),
+		"Log format: text (a terminal) or json (a container). Env: CF2CNP_LOG_FORMAT")
+	serveCmd.Flags().StringVar(&logLevel, "log-level", envOr("CF2CNP_LOG_LEVEL", "info"),
+		"Log level: debug, info, warn, or error. /health is always debug. Env: CF2CNP_LOG_LEVEL")
 
 	// YOLO command (easter egg)
 	yoloCmd := &cobra.Command{
@@ -247,9 +254,24 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	level, err := server.ParseLogLevel(logLevel)
+	if err != nil {
+		return err
+	}
+	format := strings.ToLower(strings.TrimSpace(logFormat))
+	var h slog.Handler
+	hOpts := &slog.HandlerOptions{Level: level}
+	switch format {
+	case "text":
+		h = slog.NewTextHandler(os.Stderr, hOpts)
+	case "json":
+		h = slog.NewJSONHandler(os.Stderr, hOpts)
+	default:
+		return fmt.Errorf("unknown log format %q (text, json)", logFormat)
+	}
 	srv := server.NewServerWithOptions(port, externalURL, server.Options{
 		AllowedOrigins: origins, AuthToken: authToken, DNSProfile: serveDNSProfile, DNSResolver: serveDNSResolver,
-		Version: version,
+		Version: version, Logger: slog.New(h), LogFormat: format, LogLevel: strings.ToLower(strings.TrimSpace(logLevel)),
 	})
 	return srv.Start()
 }

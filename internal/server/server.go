@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -9,7 +10,9 @@ import (
 	"fmt"
 	stdhtml "html"
 	"io"
-	"log"
+	"log/slog"
+	"math"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,6 +27,13 @@ import (
 
 // maxBodyBytes caps a /generate body (8 MiB: several thousand flows)
 const maxBodyBytes = 8 << 20
+
+// cacheTTL is how long a generated policy stays downloadable; tombstoneTTL is how long after CreatedAt we
+// still remember that it existed, so /download/{id} can answer 410 instead of a misleading 404.
+const (
+	cacheTTL     = 10 * time.Minute
+	tombstoneTTL = 24 * time.Hour
+)
 
 // CachedPolicy stores a generated policy for download
 type CachedPolicy struct {
@@ -41,7 +51,11 @@ type Server struct {
 	dnsProfile     string
 	dnsResolver    string
 	version        string // what the page shows beside the logo: main.version, set at build time (dev when unset)
+	log            *slog.Logger
+	logFormat      string // text | json: the listening line's log_format (not inferred from the handler)
+	logLevel       string // debug | info | warn | error: the listening line's log_level
 	cache          map[string]*CachedPolicy
+	expired        map[string]time.Time // id → CreatedAt of an entry cleanupCache removed; 410 vs 404 on /download
 	mu             sync.RWMutex
 }
 
@@ -52,7 +66,10 @@ type Options struct {
 	AuthToken      string
 	DNSProfile     string
 	DNSResolver    string
-	Version        string // the build's version (main.version): the page's badge; "dev" when empty
+	Version        string       // the build's version (main.version): the page's badge; "dev" when empty
+	Logger         *slog.Logger // nil → slog.Default(); request lines and refusals go here, never the token
+	LogFormat      string       // text | json; only so the listening line can name it
+	LogLevel       string       // debug | info | warn | error; only so the listening line can name it
 }
 
 // NewServer creates a new HTTP server. externalURL, when set, is the base URL clients reach the
@@ -64,6 +81,10 @@ func NewServer(port int, externalURL string) *Server {
 
 // NewServerWithOptions is NewServer with the E6 options
 func NewServerWithOptions(port int, externalURL string, opts Options) *Server {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	s := &Server{
 		port:           port,
 		externalURL:    strings.TrimRight(externalURL, "/"),
@@ -72,9 +93,12 @@ func NewServerWithOptions(port int, externalURL string, opts Options) *Server {
 		dnsProfile:     opts.DNSProfile,
 		dnsResolver:    opts.DNSResolver,
 		version:        displayVersion(opts.Version),
+		log:            logger,
+		logFormat:      opts.LogFormat,
+		logLevel:       opts.LogLevel,
 		cache:          make(map[string]*CachedPolicy),
+		expired:        make(map[string]time.Time),
 	}
-	// Start cache cleanup goroutine
 	go s.cleanupCache()
 	return s
 }
@@ -95,19 +119,28 @@ func displayVersion(v string) string {
 	return v
 }
 
-// cleanupCache removes expired cache entries
+// cleanupCache removes expired cache entries on a ticker; sweep is factored out so a test can expire an entry
+// without waiting five minutes.
 func (s *Server) cleanupCache() {
 	ticker := time.NewTicker(5 * time.Minute)
 	for range ticker.C {
-		s.mu.Lock()
-		now := time.Now()
-		for id, cached := range s.cache {
-			// Remove entries older than 10 minutes
-			if now.Sub(cached.CreatedAt) > 10*time.Minute {
-				delete(s.cache, id)
-			}
+		s.sweep(time.Now())
+	}
+}
+
+func (s *Server) sweep(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, cached := range s.cache {
+		if now.Sub(cached.CreatedAt) > cacheTTL {
+			s.expired[id] = cached.CreatedAt
+			delete(s.cache, id)
 		}
-		s.mu.Unlock()
+	}
+	for id, createdAt := range s.expired {
+		if now.Sub(createdAt) > tombstoneTTL {
+			delete(s.expired, id)
+		}
 	}
 }
 
@@ -134,21 +167,221 @@ func validDownloadID(id string) bool {
 	return true
 }
 
+// ctxKey is the type of the request-scoped values we stash (a logger with request_id). A private type so
+// another package's context value cannot collide.
+type ctxKey int
+
+const logCtxKey ctxKey = 1
+
+// ParseLogLevel maps a flag/env value to a slog level; an unknown name is an error so serve can refuse at
+// start the same way a bad --dns-profile does.
+func ParseLogLevel(name string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("unknown log level %q (debug, info, warn, error)", name)
+	}
+}
+
+// handler is the four routes behind logRequests; Start serves it, tests call it without binding a port.
+func (s *Server) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/generate", s.corsMiddleware(s.requireToken(s.handleGenerate)))
+	mux.HandleFunc("/download/", s.corsMiddleware(s.requireToken(s.handleDownload)))
+	mux.HandleFunc("/health", s.corsMiddleware(s.handleHealth))
+	mux.HandleFunc("/", s.handleIndex)
+	return s.logRequests(mux)
+}
+
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	http.HandleFunc("/generate", s.corsMiddleware(s.requireToken(s.handleGenerate)))
-	http.HandleFunc("/download/", s.corsMiddleware(s.requireToken(s.handleDownload)))
-	http.HandleFunc("/health", s.corsMiddleware(s.handleHealth))
-	http.HandleFunc("/", s.handleIndex)
-
 	addr := fmt.Sprintf(":%d", s.port)
-	srv := &http.Server{Addr: addr, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second}
-	log.Printf("Starting server on %s", addr)
-	log.Printf("POST /generate - Send Hubble flow JSON to generate CiliumNetworkPolicy YAML")
-	log.Printf("GET /download/{id} - Download generated policy")
-	log.Printf("GET /health - Health check endpoint")
-
+	srv := &http.Server{
+		Addr: addr, Handler: s.handler(),
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 60 * time.Second,
+	}
+	s.log.Info("listening", s.listeningAttrs(addr)...)
 	return srv.ListenAndServe()
+}
+
+// listeningAttrs is the listening line: what is on, never the token (a secret in the process, not an event).
+func (s *Server) listeningAttrs(addr string) []any {
+	format, level := s.logFormat, s.logLevel
+	if format == "" {
+		format = "text"
+	}
+	if level == "" {
+		level = "info"
+	}
+	var origins any = s.allowedOrigins
+	if len(s.allowedOrigins) == 0 || (len(s.allowedOrigins) == 1 && s.allowedOrigins[0] == "*") {
+		origins = "*"
+	}
+	return []any{
+		"addr", addr,
+		"version", s.version,
+		"log_format", format,
+		"log_level", level,
+		"auth_enabled", s.authToken != "",
+		"allowed_origins", origins,
+		"dns_profile", s.dnsProfile,
+		"dns_resolver", s.dnsResolver,
+	}
+}
+
+// reqLog is the request-scoped logger (it carries request_id); handlers fall back to s.log when the
+// middleware did not run — the existing tests call handleGenerate directly.
+func (s *Server) reqLog(r *http.Request) *slog.Logger {
+	if r != nil {
+		if l, ok := r.Context().Value(logCtxKey).(*slog.Logger); ok && l != nil {
+			return l
+		}
+	}
+	return s.log
+}
+
+// refuse writes a public error to the client and logs the real reason. The public text is what tests and
+// operators read; reason is a short snake_case tag for grep. Never pass a token, a header value, or the body.
+func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, public, reason string, attrs ...any) {
+	http.Error(w, public, status)
+	level := slog.LevelWarn
+	if status >= 500 {
+		level = slog.LevelError
+	}
+	args := make([]any, 0, 4+len(attrs))
+	args = append(args, "status", status, "reason", reason)
+	args = append(args, attrs...)
+	s.reqLog(r).Log(r.Context(), level, "refused", args...)
+}
+
+// validRequestID reports whether id is a proxy-minted request id: 1–128 of [A-Za-z0-9._-]. Envoy and most
+// proxies set one; anything else (a space, a 200-char paste) is replaced so the header cannot become a log bomb.
+func validRequestID(id string) bool {
+	n := len(id)
+	if n < 1 || n > 128 {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// statusWriter captures status and bytes so the request line can name them after the handler returns.
+// Default status is 200 when WriteHeader is never called (net/http's implicit 200).
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += n
+	return n, err
+}
+
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// logRequests is one line per request around every route: a request id (echoed, or minted), status, bytes,
+// duration. /health is DEBUG so kubelet probes stay quiet at info; 4xx is WARN, 5xx is ERROR. Path is
+// r.URL.Path only — a query can carry ?name= and is a separate attr, never the Authorization header or body.
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-Id")
+		if !validRequestID(id) {
+			id = generateID()
+		}
+		w.Header().Set("X-Request-Id", id)
+		logger := s.log.With("request_id", id)
+		r = r.WithContext(context.WithValue(r.Context(), logCtxKey, logger))
+		sw := &statusWriter{ResponseWriter: w}
+		start := time.Now()
+		next.ServeHTTP(sw, r)
+		status := sw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		ms := math.Round(float64(time.Since(start).Nanoseconds())/1e6*10) / 10
+		attrs := []any{
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", status,
+			"bytes", sw.bytes,
+			"duration_ms", ms,
+			"client", requestClient(r),
+			"user_agent", cutRunes(r.UserAgent(), 120),
+		}
+		if q := r.URL.RawQuery; q != "" {
+			attrs = append(attrs, "query", q)
+		}
+		if o := r.Header.Get("Origin"); o != "" {
+			attrs = append(attrs, "origin", o)
+		}
+		level := slog.LevelInfo
+		switch {
+		case r.URL.Path == "/health":
+			level = slog.LevelDebug
+		case status >= 500:
+			level = slog.LevelError
+		case status >= 400:
+			level = slog.LevelWarn
+		}
+		logger.Log(r.Context(), level, "request", attrs...)
+	})
+}
+
+// requestClient is who called: the first X-Forwarded-For hop when a proxy set one, else the remote
+// address without its port (the port is ephemeral and not useful in a grep).
+func requestClient(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		return firstValue(xff)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func cutRunes(s string, n int) string {
+	if n <= 0 || s == "" {
+		return s
+	}
+	i := 0
+	for j := range s {
+		if i == n {
+			return s[:j]
+		}
+		i++
+	}
+	return s
 }
 
 // baseURL is the base clients can reach this server at, for the download_url in JSON answers.
@@ -299,7 +532,7 @@ func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yaml
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		w.WriteHeader(http.StatusOK)
 		w.Write(yamlBytes)
-		log.Printf("Generated policy (direct): %s", filename)
+		s.reqLog(r).Info("generated", "mode", "direct", "filename", filename, "flows", flows, "policies", policies)
 		return
 	}
 	s.mu.Lock()
@@ -319,7 +552,7 @@ func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yaml
 		"policies":     policies,
 		"yaml":         string(yamlBytes),
 	})
-	log.Printf("Generated policy (cached): %s, download: %s", filename, downloadURL)
+	s.reqLog(r).Info("generated", "mode", "cached", "filename", filename, "id", id, "flows", flows, "policies", policies)
 }
 
 // corsMiddleware answers preflight and echoes the request's Origin when it is allowed — any origin when
@@ -369,7 +602,8 @@ func (s *Server) requireToken(next http.HandlerFunc) http.HandlerFunc {
 			got := bearerToken(r.Header.Get("Authorization"))
 			if !tokensEqual(got, s.authToken) {
 				w.Header().Set("WWW-Authenticate", `Bearer realm="cf2cnp"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				s.refuse(w, r, http.StatusUnauthorized, "Unauthorized", "unauthorized",
+					"has_header", r.Header.Get("Authorization") != "")
 				return
 			}
 		}
@@ -617,7 +851,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         <summary><span class="method">GET</span> <span class="path">/download/{id}</span> <span class="brief">a generated policy, by its id</span></summary>
         <div class="body">
         <p>Download a generated policy by ID. The id is the last path segment of the <code>download_url</code> a
-        <code>/generate</code> call returned; the server keeps a policy for 10 minutes.</p>
+        <code>/generate</code> call returned; the server keeps a policy for 10 minutes, 410 when it has expired,
+        404 when nothing was generated under the id.</p>
         <div class="try">
         <h3>Try it out</h3>
         <div class="controls">
@@ -829,36 +1064,45 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// Extract ID from path: /download/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/download/")
 	if id == "" {
-		http.Error(w, "Missing download ID", http.StatusBadRequest)
+		s.refuse(w, r, http.StatusBadRequest, "Missing download ID", "download_id_missing")
 		return
 	}
 	if !validDownloadID(id) {
-		http.NotFound(w, r)
+		s.refuse(w, r, http.StatusNotFound, "404 page not found", "download_id_invalid")
 		return
 	}
 
 	s.mu.RLock()
 	cached, exists := s.cache[id]
+	expiredAt, tombstoned := s.expired[id]
 	s.mu.RUnlock()
 
+	if !exists && tombstoned {
+		generatedAt := expiredAt.UTC().Format(time.RFC3339)
+		s.refuse(w, r, http.StatusGone,
+			fmt.Sprintf("This download expired: the policy was generated at %s, and a generated policy is kept for 10 minutes. Generate it again.", generatedAt),
+			"download_expired", "generated_at", generatedAt, "kept_for", "10m")
+		return
+	}
 	if !exists {
-		http.Error(w, "Download not found or expired. Please generate the policy again.", http.StatusNotFound)
+		s.refuse(w, r, http.StatusNotFound,
+			"No policy has been generated under this id. Run Generate first (the Grafana action, the page, or POST /generate with Accept: application/json), then download within 10 minutes.",
+			"download_unknown")
 		return
 	}
 
-	// Set headers for file download
 	w.Header().Set("Content-Type", "application/x-yaml")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", cached.Filename))
 	w.WriteHeader(http.StatusOK)
 	w.Write(cached.Content)
 
-	log.Printf("Downloaded policy: %s", cached.Filename)
+	s.reqLog(r).Info("downloaded", "filename", cached.Filename, "id", id)
 }
 
 // handleGenerate handles policy generation requests
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed. Use POST.", http.StatusMethodNotAllowed)
+		s.refuse(w, r, http.StatusMethodNotAllowed, "Method not allowed. Use POST.", "method_not_allowed")
 		return
 	}
 
@@ -869,16 +1113,18 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			http.Error(w, fmt.Sprintf("Request body larger than %d bytes", maxBodyBytes), http.StatusRequestEntityTooLarge)
+			s.refuse(w, r, http.StatusRequestEntityTooLarge, fmt.Sprintf("Request body larger than %d bytes", maxBodyBytes),
+				"body_too_large", "limit_bytes", maxBodyBytes)
 			return
 		}
-		http.Error(w, fmt.Sprintf("Failed to read request body: %v", err), http.StatusBadRequest)
+		s.refuse(w, r, http.StatusBadRequest, fmt.Sprintf("Failed to read request body: %v", err),
+			"body_unreadable", "error", err.Error())
 		return
 	}
 	defer r.Body.Close()
 
 	if len(body) == 0 {
-		http.Error(w, "Request body is empty. Please provide Hubble flow JSON.", http.StatusBadRequest)
+		s.refuse(w, r, http.StatusBadRequest, "Request body is empty. Please provide Hubble flow JSON.", "body_empty")
 		return
 	}
 
@@ -892,14 +1138,16 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	// Parse the flows: one object, a JSON array, or one object per line (`hubble observe -o json`)
 	parsedFlows, err := flow.ParseFlowsFromBytes(body)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to parse flow JSON: %v", err), http.StatusBadRequest)
+		s.refuse(w, r, http.StatusBadRequest, fmt.Sprintf("Failed to parse flow JSON: %v", err),
+			"flow_json_invalid", "error", err.Error())
 		return
 	}
 
 	parsedFlows = excludeFlows(parsedFlows, r.URL.Query()["exclude"]) // E4: ?exclude=key=value, repeatable
 	aggregatedFlows := aggregator.AggregateFlows(parsedFlows)
 	if len(aggregatedFlows) == 0 {
-		http.Error(w, "No valid flows found in request (every flow excluded, or none parsed)", http.StatusBadRequest)
+		s.refuse(w, r, http.StatusBadRequest, "No valid flows found in request (every flow excluded, or none parsed)",
+			"no_valid_flows")
 		return
 	}
 
@@ -922,13 +1170,13 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	if dnsProfile != "" {
 		if _, err := generator.WithDNSProfile(dnsProfile); err != nil { // auto | kubernetes | openshift
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "dns_profile_invalid", "error", err.Error())
 			return
 		}
 	}
 	if dnsResolver != "" {
 		if _, err := generator.WithDNSResolver(dnsResolver); err != nil { // <namespace>[/<label>=<value>]:<port>[/<proto>]
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "dns_resolver_invalid", "error", err.Error())
 			return
 		}
 	}
@@ -937,11 +1185,19 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	policies, yamlBytes, err := generator.GeneratePoliciesWithYAML(aggregatedFlows)
 	if err != nil {
-		if errors.Is(err, policy.ErrReplyFlow) || errors.Is(err, policy.ErrNameNeedsOnePolicy) || errors.Is(err, policy.ErrInvalidPolicy) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+		switch {
+		case errors.Is(err, policy.ErrReplyFlow):
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "reply_flow")
+		case errors.Is(err, policy.ErrNameNeedsOnePolicy):
+			n := 0
+			fmt.Sscanf(strings.TrimPrefix(err.Error(), policy.ErrNameNeedsOnePolicy.Error()+": got "), "%d", &n)
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "name_needs_single_policy", "policies", n)
+		case errors.Is(err, policy.ErrInvalidPolicy):
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "policy_invalid", "error", err.Error())
+		default:
+			s.refuse(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to generate policy: %v", err),
+				"generate_failed", "error", err.Error())
 		}
-		http.Error(w, fmt.Sprintf("Failed to generate policy: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -971,12 +1227,12 @@ func (s *Server) handleYoloNs(w http.ResponseWriter, r *http.Request, bodyStr st
 		namespace = parts[2]
 	}
 
-	log.Printf("YOLO MODE ACTIVATED for namespace: %s", namespace)
+	s.reqLog(r).Info("yolo", "namespace", namespace)
 
-	// Generate the YOLO policy
 	yamlBytes, err := policy.YOLONamespacePolicyYAML(namespace)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to generate YOLO policy: %v", err), http.StatusInternalServerError)
+		s.refuse(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to generate YOLO policy: %v", err),
+			"generate_failed", "error", err.Error())
 		return
 	}
 

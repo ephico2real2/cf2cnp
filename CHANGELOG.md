@@ -7,6 +7,19 @@ record where two independent reviewers (Cursor, Codex) went through the claims. 
 test summary on every push (the workflow's job summary): the unit tests by package, the 14 golden captures that must
 answer byte for byte, the CRD check, and `cf2cnp validate` over every golden output.
 
+## Unreleased
+
+- **Structured logging** on the HTTP server (`log/slog`, no extra library): `--log-format` (`text` / `json`, env
+  `CF2CNP_LOG_FORMAT`) and `--log-level` (`debug` / `info` / `warn` / `error`, env `CF2CNP_LOG_LEVEL`); one `listening`
+  line at start (addr, version, log_format, log_level, auth_enabled, allowed_origins, dns_profile, dns_resolver — never
+  the token); one `request` line per call with a request id (`X-Request-Id` echoed when it is 1–128 of `[A-Za-z0-9._-]`,
+  otherwise minted); refusals log a `reason`. `/health` is at debug so kubelet probes stay quiet at info. No token, no
+  Authorization header, no cookies, no request body.
+- **Download's three answers:** `200` while the policy is cached (10 minutes), `410 Gone` once it has expired (the
+  generated-at time is in the body; a tombstone is kept 24 hours so the id is not a silent 404), `404` when nothing was
+  generated under the id.
+- **Chart:** `logging.format` / `logging.level` (json by default in the chart, for a container).
+
 ## 0.8.0 — 2026-09-16 · the API page as a Swagger-like surface
 
 - The build's version beside the logo: `main.version` reaches the server through `Options.Version`; `displayVersion`
