@@ -2,9 +2,6 @@
 
 A CLI tool that generates CiliumNetworkPolicies from Hubble flow data. This tool analyzes network traffic patterns captured by Hubble and automatically creates corresponding Cilium network policies.
 
-
-**Running-test captures.** cf2cnp runs on every CI run of a reference Cilium 1.20.1 lab (a two-cluster ClusterMesh on kind) and the results are captured — see the [`ci-captures` branch](https://github.com/ephico2real2/cilium-implementation-poc/tree/ci-captures) (newest run first): `cf2cnp.png` (the tool output), `grafana-policy-verdicts-cf2cnp-lab.png` (the generated policy under audit / enforce), `hubble-ui-cf2cnp-lab.png`.
-
 ## Features
 
 - **Automatic Policy Generation**: Reads Hubble flow JSON files and generates CiliumNetworkPolicy YAML files
@@ -52,7 +49,7 @@ Every `v*` tag publishes `cf2cnp_<version>_<os>_<arch>.tar.gz` (linux and darwin
 checksums file on the tag's GitHub release, for pipelines that run `cf2cnp merge` without a Go toolchain:
 
 ```bash
-curl -sSL -o cf2cnp.tgz https://github.com/ephico2real2/cf2cnp/releases/download/v0.8.0/cf2cnp_0.8.0_linux_amd64.tar.gz
+curl -sSL -o cf2cnp.tgz https://github.com/onzack/cf2cnp/releases/download/v<version>/cf2cnp_<version>_linux_amd64.tar.gz
 tar -xzf cf2cnp.tgz && sudo install cf2cnp /usr/local/bin/cf2cnp
 ```
 
@@ -62,7 +59,7 @@ Clone the repository and build the binary:
 
 ```bash
 # Clone the repository
-git clone https://github.com/ephico2real2/cf2cnp.git
+git clone https://github.com/onzack/cf2cnp.git
 cd cf2cnp
 
 # Build the binary
@@ -73,11 +70,6 @@ go build -o cf2cnp.exe ./cmd/cf2cnp
 ```
 
 ## Installation
-
-> **Fork note (ephico2real2/cf2cnp):** while the changes on this fork are pending upstream, the fork's chart is published as a
-> classic Helm repository at `https://ephico2real2.github.io/cf2cnp` (chart 0.8.0, appVersion 0.8.0) and its image as
-> `ghcr.io/ephico2real2/cf2cnp:0.8.0`. `helm repo add cf2cnp-fork https://ephico2real2.github.io/cf2cnp`.
-> The same chart is on GHCR as OCI: `oci://ghcr.io/ephico2real2/helm-charts/cf2cnp` (version 0.8.0).
 
 The easiest way to use `CF2CNP` is to deploy it together with the [hubble-observer Helm chart](https://github.com/onzack/hubble-observer). This chart installs both the Hubble observer (to collect network flow data) and `CF2CNP` into your Kubernetes cluster, so you can generate policies directly from observed traffic. You can find installation instructions and configuration options for the Helm chart in the [hubble-observer Helm chart repository](https://github.com/onzack/hubble-observer).
 
@@ -210,11 +202,10 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
 
 ### The web UI
 
-Open the server's root (`http://localhost:8080`, or wherever the chart's route points — the lab below is
-`cf2cnp.poc.local`) and the page documents the three endpoints the way Swagger UI would: the build's version
-beside the logo, each endpoint a card that unfolds into its description and a Try-it-out panel. Screenshots
-from the 0.8.0 release on a Cilium 1.20.1 kind cluster, with the 24 HTTP flows demo 30 of the lab recorded
-(`hubble observe -o json`):
+Open the server's root (`http://localhost:8080`, or wherever your route points) and the page documents the three
+endpoints the way Swagger UI would: the build's version beside the logo, each endpoint a card that unfolds into its
+description and a Try-it-out panel. Screenshots
+from 0.8.0 on a Cilium 1.20.1 kind cluster; the input is 24 HTTP flows recorded with `hubble observe -o json`:
 
 ![The API page: the version badge and the three endpoint cards](docs/images/01-api-page.png)
 
