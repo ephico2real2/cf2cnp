@@ -361,6 +361,7 @@ func TestIndexPage_VersionAndTryItOut(t *testing.T) {
 		`<details class="endpoint" id="ep-generate"`, `<details class="endpoint" id="ep-download"`, `<details class="endpoint" id="ep-health"`,
 		`id="flowInput"`, `id="downloadId"`, `onclick="sendDownload()"`, `onclick="sendHealth()"`, `id="healthResult"`,
 		"function onOpenGenerate", "function sendDownload", "function sendHealth",
+		`#result, #downloadResult, #healthResult {`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the page must contain %q", want)

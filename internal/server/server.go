@@ -509,7 +509,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
         }
-        #result {
+        #result, #downloadResult, #healthResult {
             margin-top: 1rem;
             white-space: pre-wrap;
         }

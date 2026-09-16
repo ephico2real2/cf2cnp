@@ -26,13 +26,13 @@ the CRD of the same Cilium version is embedded from the module (`internal/crd`, 
 CI). `cf2cnp version` prints both:
 
 ```text
-cf2cnp 0.7.0
+cf2cnp 0.8.0
 policy spec: CiliumNetworkPolicy cilium.io/v2 as of Cilium v1.20.1 (types: github.com/cilium/cilium/pkg/policy/api v1.20.1; CRD embedded from the same module)
 ```
 
 | cf2cnp | Cilium policy spec | Notes |
 |---|---|---|
-| 0.7.0 | v1.20.1 | Cilium's types; `fromCIDR` for external sources; the DNS resolver from the flows (Kubernetes / OpenShift); `validate`, `version` |
+| 0.7.0 – 0.8.0 | v1.20.1 | Cilium's types; `fromCIDR` for external sources; the DNS resolver from the flows (Kubernetes / OpenShift); `validate`, `version`; 0.8.0: the API page as a Swagger-like surface (see [The web UI](#the-web-ui)) |
 | 0.5.0 – 0.6.3 | hand-written subset | 20 of the spec's 291 fields (`docs/CRD-SPEC-FORENSICS.md`) |
 
 A Cilium bump is a release: Renovate proposes it (`renovate.json`), the embedded CRD follows, and the golden tests
@@ -52,7 +52,7 @@ Every `v*` tag publishes `cf2cnp_<version>_<os>_<arch>.tar.gz` (linux and darwin
 checksums file on the tag's GitHub release, for pipelines that run `cf2cnp merge` without a Go toolchain:
 
 ```bash
-curl -sSL -o cf2cnp.tgz https://github.com/ephico2real2/cf2cnp/releases/download/v0.6.0/cf2cnp_0.6.0_linux_amd64.tar.gz
+curl -sSL -o cf2cnp.tgz https://github.com/ephico2real2/cf2cnp/releases/download/v0.8.0/cf2cnp_0.8.0_linux_amd64.tar.gz
 tar -xzf cf2cnp.tgz && sudo install cf2cnp /usr/local/bin/cf2cnp
 ```
 
@@ -62,7 +62,7 @@ Clone the repository and build the binary:
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/ephico2real2/cf2cnp.git
 cd cf2cnp
 
 # Build the binary
@@ -75,8 +75,9 @@ go build -o cf2cnp.exe ./cmd/cf2cnp
 ## Installation
 
 > **Fork note (ephico2real2/cf2cnp):** while the changes on this fork are pending upstream, the fork's chart is published as a
-> classic Helm repository at `https://ephico2real2.github.io/cf2cnp` (chart 0.7.0, appVersion 0.7.0) and its image as
-> `ghcr.io/ephico2real2/cf2cnp:0.7.0`. `helm repo add cf2cnp-fork https://ephico2real2.github.io/cf2cnp`.
+> classic Helm repository at `https://ephico2real2.github.io/cf2cnp` (chart 0.8.0, appVersion 0.8.0) and its image as
+> `ghcr.io/ephico2real2/cf2cnp:0.8.0`. `helm repo add cf2cnp-fork https://ephico2real2.github.io/cf2cnp`.
+> The same chart is on GHCR as OCI: `oci://ghcr.io/ephico2real2/helm-charts/cf2cnp` (version 0.8.0).
 
 The easiest way to use `CF2CNP` is to deploy it together with the [hubble-observer Helm chart](https://github.com/onzack/hubble-observer). This chart installs both the Hubble observer (to collect network flow data) and `CF2CNP` into your Kubernetes cluster, so you can generate policies directly from observed traffic. You can find installation instructions and configuration options for the Helm chart in the [hubble-observer Helm chart repository](https://github.com/onzack/hubble-observer).
 
@@ -106,6 +107,8 @@ cf2cnp generate --input <input-directory> --output <output-directory>
 cf2cnp generate --input ./inputfolder --output ./generated-policies
 ```
 
+Every policy's `description` is written from its rules (0.6.2, 0.6.3): the subject, each peer the way the selector names it (with its namespace or cluster when they differ), the ports, and the L7 rules — `Allow ingress to shop/frontend in cf2cnp-lab27: from pos on TCP/80 (HTTP GET /, GET /checkout); from kiosk on TCP/80`.
+
 ### 1b. Merge into an existing policy (CLI)
 
 Evolve a policy that is already applied instead of regenerating it — every field of the existing document
@@ -116,6 +119,12 @@ twice changes nothing:
 cf2cnp merge --existing policies/shop.yaml --input flows.json          # in place
 cf2cnp merge --existing policies/shop.yaml --input flows/ -o new.yaml  # to another file
 ```
+
+The merged file is the existing file plus the new rules — key order, comments, quoting and indentation are kept, so a pull
+request shows the rules that were added and nothing else (0.6.1; 0.6.0 re-serialised the whole document).
+
+The flows must produce exactly one policy, for the same target (namespace, name, endpointSelector) as the
+existing file; otherwise the command refuses.
 
 ### The DNS resolver rule (toFQDNs, --dns-visibility)
 
@@ -148,21 +157,6 @@ on a dual-stack cluster — with an address: an egress-gateway IP, a load balanc
 address it stays `fromEntities: [world]`. Cilium refuses a rule that mixes `fromEndpoints` and `fromCIDR`, so cf2cnp
 keeps them in separate rules (and `Sanitize` would say so).
 
-```bash
-cf2cnp merge --existing policies/shop.yaml --input flows/ -o new.yaml  # to another file
-```
-
-Every policy's `description` is written from its rules (0.6.2, 0.6.3): the subject, each peer the way the selector names it (with its namespace or cluster when they differ), the ports, and the L7 rules — `Allow ingress to shop/frontend in cf2cnp-lab27: from pos on TCP/80 (HTTP GET /, GET /checkout); from kiosk on TCP/80`.
-
-The merged file is the existing file plus the new rules — key order, comments, quoting and indentation are kept, so a pull
-request shows the rules that were added and nothing else (0.6.1; 0.6.0 re-serialised the whole document).
-
-```bash
-```
-
-The flows must produce exactly one policy, for the same target (namespace, name, endpointSelector) as the
-existing file; otherwise the command refuses.
-
 ### 2. HTTP Server Mode
 
 Start an HTTP server to generate policies via API:
@@ -179,6 +173,8 @@ cf2cnp serve --port 8080
 | `--external-url` |       | string | Base URL clients reach the server at, used for `download_url` (env `CF2CNP_EXTERNAL_URL`). Empty: derived from the request and its `Forwarded` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers | `""`    |
 | `--dns-profile`  |       | string | The DNS resolver profile a request gets when it omits `?dnsProfile=`: `auto`, `kubernetes`, `openshift` (env `CF2CNP_DNS_PROFILE`; a bad value stops the server at start) | `auto`  |
 | `--dns-resolver` |       | string | The DNS resolver a request gets when it omits `?dnsResolver=`, `<namespace>[/<label>=<value>]:<port>[/<protocol>]` (env `CF2CNP_DNS_RESOLVER`) | `""`    |
+| `--allowed-origins` |       | string | Comma-separated origins allowed by CORS (e.g. `https://grafana.example.com`); empty or `*` = any origin (env `CF2CNP_ALLOWED_ORIGINS`) | `""`    |
+| `--auth-token`      |       | string | When set, `/generate` and `/download` require `Authorization: Bearer <token>` (env `CF2CNP_AUTH_TOKEN`; prefer the env) | `""`    |
 
 ---
 
@@ -186,10 +182,10 @@ cf2cnp serve --port 8080
 
 | Method | Endpoint       | Description                                              | Request Body                  | Response            |
 |--------|---------------|-----------------------------------------------------------|-------------------------------|---------------------|
-| `POST` | `/generate`   | Generate policies from Hubble flow JSON: one flow, a JSON array, or one flow per line. `?name=<name>` names the (single) resulting policy | Hubble flow JSON | CiliumNetworkPolicy YAML (one document per policy), or JSON when the request carries `Accept: application/json` or `X-Grafana-Action` |
+| `POST` | `/generate`   | Generate policies from Hubble flow JSON: one flow, a JSON array, or one flow per line. `?name=<name>` names the (single) resulting policy; `?l7=true` emits layer-7 rules; `?dnsVisibility=true` adds the DNS resolver rule for world traffic without names; `?dnsProfile=` / `?dnsResolver=` pick the resolver; `?exclude=key=value` (repeatable) drops flows whose peer carries that label | Hubble flow JSON | CiliumNetworkPolicy YAML (one document per policy), or JSON when the request carries `Accept: application/json` or `X-Grafana-Action` |
 | `GET`  | `/download/{id}` | Download a policy generated by a JSON-mode request (cached for 10 minutes; `{id}` is the flow's UUID for a single flow) | _none_ | CiliumNetworkPolicy YAML as an attachment |
 | `GET`  | `/health`     | Health check for the service                              | _none_                        | Status message      |
-| `GET`  | `/`           | Access the integrated Web UI for testing and generation   | _none_                        | Web UI page         |
+| `GET`  | `/`           | The API page: each endpoint documented, with a Try-it-out panel under it ([The web UI](#the-web-ui)) | _none_                        | Web UI page         |
 
 The JSON answer is `{"download_url", "filename", "message", "flows", "policies", "yaml"}` — the YAML is in it, so a client
 need not follow the URL. `download_url` is built from `--external-url` when set, else from the request and the proxy
@@ -212,9 +208,52 @@ curl -X POST http://localhost:8080/generate --data-binary @flows.json -o policie
 curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -o policy.yaml
 ```
 
-#### Example: Using the Web UI
+### The web UI
 
-Open `http://localhost:8080` in your browser to access the web interface where you can paste flow JSON and download the generated policy.
+Open the server's root (`http://localhost:8080`, or wherever the chart's route points — the lab below is
+`cf2cnp.poc.local`) and the page documents the three endpoints the way Swagger UI would: the build's version
+beside the logo, each endpoint a card that unfolds into its description and a Try-it-out panel. Screenshots
+from the 0.8.0 release on a Cilium 1.20.1 kind cluster, with the 24 HTTP flows demo 30 of the lab recorded
+(`hubble observe -o json`):
+
+![The API page: the version badge and the three endpoint cards](docs/images/01-api-page.png)
+
+The page as it opens: `v0.8.0` beside the logo, `POST /generate`, `GET /download/{id}`, `GET /health`, and the curl
+example written on the page's own base URL.
+
+![/generate unfolded with 24 flows pasted, layer-7 rules on](docs/images/02-generate-flows-pasted.png)
+
+**Paste flows.** One flow, a JSON array or one flow per line. The page parses as you type — `24 flow(s) parsed`,
+each summarised as `direction verdict source → destination:port` — and lists the peers the policy would allow
+(`pos`, `shop/frontend`, 12 flows each); untick one to exclude it. Layer-7 rules ticked, so HTTP method + path from
+the flows' `l7` records become `rules.http`.
+
+![The generate result: two CiliumNetworkPolicies with HTTP rules](docs/images/03-generate-result.png)
+
+**Generate Policy.** `24 flow(s) → 2 policies` — one per workload, one rule per peer: `shop-backend` allows
+`shop/frontend` on TCP/80 `GET /api/orders`, `shop-frontend` allows `pos` on `GET /` and `GET /checkout`; every
+policy carries `app.kubernetes.io/managed-by: cf2cnp` and a description written from its rules. Copy YAML and
+Download YAML are live; the page names the file to `kubectl apply`.
+
+![/download/{id} with the id filled in from the generate, HTTP 200](docs/images/04-download-by-id.png)
+
+**/download/{id}.** The id is filled in from the last generate's `download_url`; Send fetches the same YAML
+(`HTTP 200 OK · 17 ms · application/x-yaml`), and "open in a new tab" is the plain link. The server keeps a
+policy for 10 minutes.
+
+![/health: Send answers HTTP 200 OK](docs/images/05-health.png)
+
+**/health.** `HTTP 200 · text/plain` and `OK` — the probe the chart's liveness and readiness use.
+
+![A refusal: a policy name given for flows that make two policies](docs/images/06-generate-refusal.png)
+
+**A refusal is a sentence, not a stack trace.** A name was typed while the flows make two policies:
+`Error: a policy name can only be set when the flows produce a single policy: got 2` (HTTP 400). Cilium's own
+`Sanitize()` refusals arrive the same way.
+
+An access token typed in the form goes only into this tab's `sessionStorage` and the request's `Authorization`
+header (for a server started with `--auth-token`); with a token in the field, the download's new-tab link is
+hidden, since a navigation cannot carry the header.
 
 ## Docker Deployment
 
@@ -246,7 +285,7 @@ The tool expects Hubble flow data in JSON format. Each file should contain a sin
     },
     "destination": {
       "namespace": "destination-namespace",
-      "labels": ["k8s:app.kubernetes.io/name=source-service"]
+      "labels": ["k8s:app.kubernetes.io/name=destination-service", "k8s:app.kubernetes.io/component=destination-component"]
     },
     "destination_names": ["onzack.com"],
     "l4": {
@@ -280,10 +319,14 @@ The generated CiliumNetworkPolicy files follow the [Cilium Network Policy specif
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: destination-service
+  name: destination-service-destination-component
   namespace: destination-namespace
+  labels:
+    app.kubernetes.io/component: destination-component
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: destination-service
 spec:
-  description: Allow ingress traffic from source-namespace to destination-namespace for the destination-service
+  description: 'Allow ingress to destination-service/destination-component in destination-namespace: from source-service/source-component in source-namespace on TCP/80'
   endpointSelector:
     matchLabels:
       app.kubernetes.io/component: destination-component
@@ -291,6 +334,7 @@ spec:
   ingress:
     - fromEndpoints:
         - matchLabels:
+            app.kubernetes.io/component: source-component
             app.kubernetes.io/name: source-service
             io.kubernetes.pod.namespace: source-namespace
       toPorts:
@@ -309,8 +353,11 @@ kind: CiliumNetworkPolicy
 metadata:
   name: source-service
   namespace: source-namespace
+  labels:
+    app.kubernetes.io/managed-by: cf2cnp
+    app.kubernetes.io/name: source-service
 spec:
-  description: Allow egress traffic from source-namespace to onzack.com for the source-service
+  description: 'Allow egress from source-service in source-namespace: to onzack.com on TCP/443; to kube-dns in kube-system on ANY/53 (DNS *)'
   endpointSelector:
     matchLabels:
       app.kubernetes.io/name: source-service
@@ -321,7 +368,6 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
-    # DNS resolution rule (required for toFQDNs to work)
     - toEndpoints:
         - matchLabels:
             io.kubernetes.pod.namespace: kube-system
@@ -329,11 +375,14 @@ spec:
       toPorts:
         - ports:
             - port: "53"
-              protocol: UDP
+              protocol: ANY
           rules:
             dns:
               - matchPattern: '*'
 ```
+
+The DNS rule's protocol is `ANY`, as Cilium's examples write it: a truncated UDP answer is retried over TCP, and a
+UDP-only rule would deny that retry under default-deny egress.
 
 ## Easter Egg: YOLO Mode
 
