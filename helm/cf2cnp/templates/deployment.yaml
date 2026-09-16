@@ -35,6 +35,10 @@ spec:
             - serve
             - --port
             - {{ .Values.containerPort | quote }}
+            - --log-format
+            - {{ .Values.logging.format | quote }}
+            - --log-level
+            - {{ .Values.logging.level | quote }}
             {{- if .Values.externalURL }}
             - --external-url
             - {{ .Values.externalURL | quote }}
