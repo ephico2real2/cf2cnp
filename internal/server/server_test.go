@@ -438,3 +438,82 @@ func TestDisplayVersion(t *testing.T) {
 		}
 	}
 }
+
+// Review C3: version and the derived base URL are written into the HTML page and must be escaped
+func TestIndexPage_EscapesDynamicValues(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "safe.example"
+	req.Header.Set("X-Forwarded-Host", "<svg>")
+	rec := httptest.NewRecorder()
+	NewServerWithOptions(8080, "", Options{Version: "<img>"}).handleIndex(rec, req)
+	page := rec.Body.String()
+	if strings.Contains(page, "<img>") {
+		t.Fatalf("unescaped version reached the page")
+	}
+	if strings.Contains(page, "http://<svg>") {
+		t.Fatalf("unescaped host reached the page")
+	}
+	if !strings.Contains(page, "&lt;img&gt;") {
+		t.Fatalf("the page must contain %q", "&lt;img&gt;")
+	}
+	if !strings.Contains(page, "http://&lt;svg&gt;") {
+		t.Fatalf("the page must contain %q", "http://&lt;svg&gt;")
+	}
+}
+
+// Review C4: a caller-supplied flow uuid is the cache key and must not become a path such as /download/..
+func TestDownloadIDCannotEscapeItsPath(t *testing.T) {
+	s := NewServer(8080, "")
+	flowJSON := fixture(t, "ingress-pos-to-shop.json")
+	var wrap struct {
+		Flow struct {
+			UUID string `json:"uuid"`
+		} `json:"flow"`
+	}
+	if err := json.Unmarshal([]byte(flowJSON), &wrap); err != nil || wrap.Flow.UUID == "" {
+		t.Fatalf("fixture uuid: %v %q", err, wrap.Flow.UUID)
+	}
+	body := strings.Replace(flowJSON, wrap.Flow.UUID, "..", 1)
+	m := jsonBody(t, post(t, s, "/generate", body, map[string]string{"Accept": "application/json"}))
+	url, _ := m["download_url"].(string)
+	if strings.HasSuffix(url, "/download/..") {
+		t.Fatalf("download_url must not use the caller-supplied path: %q", url)
+	}
+	id := url[strings.LastIndex(url, "/")+1:]
+	req := httptest.NewRequest(http.MethodGet, "/download/"+id, nil)
+	rec := httptest.NewRecorder()
+	s.handleDownload(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("download: %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	s.handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(rec.Body.String(), `/^[A-Za-z0-9_-]+$/`) {
+		t.Fatalf("the page must contain the id regex")
+	}
+}
+
+// Review C5: opening /generate must not load the example over typed whitespace
+func TestIndexPage_OpenGeneratePreservesTypedWhitespace(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	if !strings.Contains(page, "input.value === ''") {
+		t.Fatalf("the page must contain %q", "input.value === ''")
+	}
+	if strings.Contains(page, "document.getElementById('flowInput').value.trim()") {
+		t.Fatalf("the trim check must be gone")
+	}
+}
+
+func TestIndexPage_StatesActualCacheLifetime(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	if !strings.Contains(page, "keeps a policy for 10 minutes") {
+		t.Fatalf("the page must contain %q", "keeps a policy for 10 minutes")
+	}
+	if strings.Contains(page, "for an hour") {
+		t.Fatalf("the hour claim must be gone")
+	}
+}

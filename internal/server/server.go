@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	stdhtml "html"
 	"io"
 	"log"
 	"net/http"
@@ -115,6 +116,22 @@ func generateID() string {
 	bytes := make([]byte, 16)
 	rand.Read(bytes)
 	return hex.EncodeToString(bytes)
+}
+
+// validDownloadID reports whether id is one safe URL path segment: the alphabet of generated ids and of Hubble
+// UUIDs; anything else (a flow's uuid is caller-supplied) is replaced by a random id (review C4)
+func validDownloadID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Start starts the HTTP server
@@ -286,6 +303,9 @@ func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yaml
 		return
 	}
 	s.mu.Lock()
+	if !validDownloadID(id) {
+		id = generateID()
+	}
 	s.cache[id] = &CachedPolicy{Content: yamlBytes, Filename: filename, CreatedAt: time.Now()}
 	s.mu.Unlock()
 	downloadURL := fmt.Sprintf("%s/download/%s", s.baseURL(r), id)
@@ -597,7 +617,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         <summary><span class="method">GET</span> <span class="path">/download/{id}</span> <span class="brief">a generated policy, by its id</span></summary>
         <div class="body">
         <p>Download a generated policy by ID. The id is the last path segment of the <code>download_url</code> a
-        <code>/generate</code> call returned; the server keeps a policy for an hour.</p>
+        <code>/generate</code> call returned; the server keeps a policy for 10 minutes.</p>
         <div class="try">
         <h3>Try it out</h3>
         <div class="controls">
@@ -717,7 +737,7 @@ curl -X POST "__CF2CNP_BASE__/generate?name=shop-from-pos" -d @flow.json -o poli
         }
         let lastYAML = '', lastFilename = 'ciliumnetworkpolicy.yaml';
         // Swagger's "Try it out" shows the example value: the flow textarea is filled the first time /generate unfolds (never over what was typed)
-        function onOpenGenerate(d) { if (d.open && !document.getElementById('flowInput').value.trim()) loadExample(); }
+        function onOpenGenerate(d) { const input = document.getElementById('flowInput'); if (d.open && input.value === '') loadExample(); }
         function authHeaders(h) { const token = document.getElementById('token').value.trim(); if (token) h['Authorization'] = 'Bearer ' + token; return h; }
         // one response line the way Swagger shows it: the status, the time, then the body
         function showResponse(statusId, resultId, response, body, ms) {
@@ -729,6 +749,7 @@ curl -X POST "__CF2CNP_BASE__/generate?name=shop-from-pos" -d @flow.json -o poli
         async function sendDownload() {
             const id = document.getElementById('downloadId').value.trim();
             if (!id) { document.getElementById('downloadStatus').textContent = 'an id is needed — run /generate first, or paste one'; return; }
+            if (!/^[A-Za-z0-9_-]+$/.test(id)) { document.getElementById('downloadStatus').textContent = 'the id must contain only letters, numbers, hyphens or underscores'; return; }
             const url = '/download/' + encodeURIComponent(id); const t0 = performance.now();
             try { const r = await fetch(url, { headers: authHeaders({}) }); showResponse('downloadStatus', 'downloadResult', r, await r.text(), Math.round(performance.now() - t0)); }
             catch (e) { document.getElementById('downloadStatus').textContent = 'Error: ' + e.message; }
@@ -790,8 +811,8 @@ curl -X POST "__CF2CNP_BASE__/generate?name=shop-from-pos" -d @flow.json -o poli
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(strings.NewReplacer(
-		"__CF2CNP_VERSION__", s.version,
-		"__CF2CNP_BASE__", s.baseURL(r),
+		"__CF2CNP_VERSION__", stdhtml.EscapeString(s.version),
+		"__CF2CNP_BASE__", stdhtml.EscapeString(s.baseURL(r)),
 	).Replace(html)))
 }
 
