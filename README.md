@@ -174,7 +174,8 @@ cf2cnp serve --port 8080
 
 The HTTP server writes structured logs (`log/slog`) to stderr. One `listening` line at start; then **one `request` line
 per call** with `request_id`, `method`, `path` (no query string), `status`, `bytes`, `duration_ms`, `client`,
-`user_agent` (cut to 120 chars), plus `query` when the URL has one and `origin` when the Origin header is set. The
+`user_agent` (cut to 120 chars), plus `params` (query parameter names only, sorted, never values) when the URL has a
+query and `origin` when the Origin header is set. The
 request id is taken from `X-Request-Id` when it is 1–128 characters of `[A-Za-z0-9._-]`, otherwise minted, and always
 echoed as the `X-Request-Id` response header so a proxy and the logs share an id. `/health` is logged at **debug** so
 probes stay quiet at info; other routes are info below 400, warn on 4xx, error on 5xx. A refusal logs a `refused` line

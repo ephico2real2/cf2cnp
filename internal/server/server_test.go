@@ -770,6 +770,20 @@ func TestDownload_ThreeAnswers(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("present: %d %s", rec.Code, rec.Body.String())
 	}
+
+	buf.Reset()
+	rec = httptest.NewRecorder()
+	s.handleDownload(rec, httptest.NewRequest(http.MethodGet, "/download/bad!id", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("invalid id: %d %s", rec.Code, rec.Body.String())
+	}
+	invalid := logsWithMsg(decodeLogs(t, buf), "refused")
+	if len(invalid) != 1 || invalid[0]["reason"] != "download_id_invalid" {
+		t.Fatalf("invalid reason: %v", invalid)
+	}
+	if invalid[0]["reason"] == "download_unknown" {
+		t.Fatal("bad!id must be download_id_invalid, distinct from download_unknown")
+	}
 }
 
 func TestParseLogLevel(t *testing.T) {
@@ -806,5 +820,87 @@ func TestListeningAttrs_NoSecret(t *testing.T) {
 	}
 	if m["auth_enabled"] != true || m["log_format"] != "json" || m["log_level"] != "debug" {
 		t.Fatalf("listening attrs: %v", m)
+	}
+}
+
+func TestRequestLog_HeaderSetBeforeHandler(t *testing.T) {
+	s := NewServer(8080, "")
+	var got string
+	h := s.logRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = w.Header().Get("X-Request-Id")
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got == "" {
+		t.Fatal("X-Request-Id must be set before the handler runs")
+	}
+}
+
+func TestRequestLog_PanicIsLoggedAnd500(t *testing.T) {
+	logger, buf := jsonLogger()
+	s := NewServerWithOptions(8080, "", Options{Logger: logger})
+	h := s.logRequests(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boom", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d %s", rec.Code, rec.Body.String())
+	}
+	lines := decodeLogs(t, buf)
+	panics := logsWithMsg(lines, "panic")
+	reqs := logsWithMsg(lines, "request")
+	if len(panics) != 1 || panics[0]["level"] != "ERROR" || !strings.Contains(buf.String(), "boom") {
+		t.Fatalf("panic line: %v log=%s", panics, buf.String())
+	}
+	if len(reqs) != 1 || logInt(reqs[0]["status"]) != 500 {
+		t.Fatalf("request: %v", reqs)
+	}
+	if panics[0]["request_id"] == nil || panics[0]["request_id"] == "" || panics[0]["request_id"] != reqs[0]["request_id"] {
+		t.Fatalf("shared request_id: panic=%v request=%v", panics[0]["request_id"], reqs[0]["request_id"])
+	}
+}
+
+func TestRequestLog_QueryLogsNamesOnly(t *testing.T) {
+	logger, buf := jsonLogger()
+	s := NewServerWithOptions(8080, "", Options{Logger: logger})
+	rec := httptest.NewRecorder()
+	s.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health?name=s3cret-name&l7=true", nil))
+	out := buf.String()
+	if strings.Contains(out, "s3cret-name") {
+		t.Fatalf("query value leaked: %s", out)
+	}
+	reqs := logsWithMsg(decodeLogs(t, buf), "request")
+	if len(reqs) != 1 {
+		t.Fatalf("request lines: %v", reqs)
+	}
+	got, err := json.Marshal(reqs[0]["params"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != `["l7","name"]` {
+		t.Fatalf("params = %s, want [\"l7\",\"name\"]", got)
+	}
+}
+
+func TestRefused_ErrorAttrIsCut(t *testing.T) {
+	logger, buf := jsonLogger()
+	s := NewServerWithOptions(8080, "", Options{Logger: logger})
+	body := `{"flow":{"l4":{"TCP":{"destination_port": ` + strings.Repeat("7", 5000) + `}}}}`
+	rec := httptest.NewRecorder()
+	s.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d %s", rec.Code, rec.Body.String())
+	}
+	refused := logsWithMsg(decodeLogs(t, buf), "refused")
+	if len(refused) != 1 {
+		t.Fatalf("refused: %v log=%s", refused, buf.String())
+	}
+	errAttr, ok := refused[0]["error"].(string)
+	if !ok {
+		t.Fatalf("error attr missing: %v", refused[0])
+	}
+	if n := len([]rune(errAttr)); n > 200 {
+		t.Fatalf("error attr is %d runes, want ≤ 200", n)
 	}
 }

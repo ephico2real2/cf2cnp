@@ -14,6 +14,8 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,11 +30,12 @@ import (
 // maxBodyBytes caps a /generate body (8 MiB: several thousand flows)
 const maxBodyBytes = 8 << 20
 
-// cacheTTL is how long a generated policy stays downloadable; tombstoneTTL is how long after CreatedAt we
-// still remember that it existed, so /download/{id} can answer 410 instead of a misleading 404.
+// cacheTTL is how long a generated policy stays downloadable. tombstoneTTL is how long after CreatedAt we still
+// remember that it existed, so /download/{id} can answer 410 instead of a misleading 404 — the case it serves is
+// "I came back a while later". Every JSON generate leaves one tombstone, so the map is bounded by an hour of generates.
 const (
 	cacheTTL     = 10 * time.Minute
-	tombstoneTTL = 24 * time.Hour
+	tombstoneTTL = 1 * time.Hour
 )
 
 // CachedPolicy stores a generated policy for download
@@ -257,7 +260,15 @@ func (s *Server) refuse(w http.ResponseWriter, r *http.Request, status int, publ
 	}
 	args := make([]any, 0, 4+len(attrs))
 	args = append(args, "status", status, "reason", reason)
-	args = append(args, attrs...)
+	for i := 0; i < len(attrs); {
+		if k, ok := attrs[i].(string); ok && k == "error" && i+1 < len(attrs) {
+			args = append(args, "error", cutRunes(fmt.Sprint(attrs[i+1]), 200))
+			i += 2
+			continue
+		}
+		args = append(args, attrs[i])
+		i++
+	}
 	s.reqLog(r).Log(r.Context(), level, "refused", args...)
 }
 
@@ -309,9 +320,18 @@ func (w *statusWriter) Flush() {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// requestTooLarge lets http.MaxBytesReader mark the connection to close after a 413, as it does on the bare
+// writer: it type-asserts an unexported interface with this method name, which Unwrap does not satisfy.
+func (w *statusWriter) requestTooLarge() {
+	if rt, ok := w.ResponseWriter.(interface{ requestTooLarge() }); ok {
+		rt.requestTooLarge()
+	}
+}
+
 // logRequests is one line per request around every route: a request id (echoed, or minted), status, bytes,
 // duration. /health is DEBUG so kubelet probes stay quiet at info; 4xx is WARN, 5xx is ERROR. Path is
-// r.URL.Path only — a query can carry ?name= and is a separate attr, never the Authorization header or body.
+// r.URL.Path only — a query's parameter names are a separate attr (`params`, never values), never the
+// Authorization header or body. A handler panic is logged and answered 500; the request line still runs.
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-Id")
@@ -323,37 +343,52 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		r = r.WithContext(context.WithValue(r.Context(), logCtxKey, logger))
 		sw := &statusWriter{ResponseWriter: w}
 		start := time.Now()
+		defer func() {
+			if p := recover(); p != nil && p != http.ErrAbortHandler {
+				logger.Log(r.Context(), slog.LevelError, "panic",
+					"panic", cutRunes(fmt.Sprint(p), 200),
+					"stack", cutRunes(string(debug.Stack()), 4000))
+				if sw.status == 0 {
+					http.Error(sw, "Internal Server Error", http.StatusInternalServerError)
+				}
+			}
+			status := sw.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			ms := math.Round(float64(time.Since(start).Nanoseconds())/1e6*10) / 10
+			attrs := []any{
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", status,
+				"bytes", sw.bytes,
+				"duration_ms", ms,
+				"client", requestClient(r),
+				"user_agent", cutRunes(r.UserAgent(), 120),
+			}
+			if q := r.URL.Query(); len(q) > 0 {
+				names := make([]string, 0, len(q))
+				for k := range q {
+					names = append(names, k)
+				}
+				sort.Strings(names)
+				attrs = append(attrs, "params", names)
+			}
+			if o := r.Header.Get("Origin"); o != "" {
+				attrs = append(attrs, "origin", o)
+			}
+			level := slog.LevelInfo
+			switch {
+			case r.URL.Path == "/health":
+				level = slog.LevelDebug
+			case status >= 500:
+				level = slog.LevelError
+			case status >= 400:
+				level = slog.LevelWarn
+			}
+			logger.Log(r.Context(), level, "request", attrs...)
+		}()
 		next.ServeHTTP(sw, r)
-		status := sw.status
-		if status == 0 {
-			status = http.StatusOK
-		}
-		ms := math.Round(float64(time.Since(start).Nanoseconds())/1e6*10) / 10
-		attrs := []any{
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", status,
-			"bytes", sw.bytes,
-			"duration_ms", ms,
-			"client", requestClient(r),
-			"user_agent", cutRunes(r.UserAgent(), 120),
-		}
-		if q := r.URL.RawQuery; q != "" {
-			attrs = append(attrs, "query", q)
-		}
-		if o := r.Header.Get("Origin"); o != "" {
-			attrs = append(attrs, "origin", o)
-		}
-		level := slog.LevelInfo
-		switch {
-		case r.URL.Path == "/health":
-			level = slog.LevelDebug
-		case status >= 500:
-			level = slog.LevelError
-		case status >= 400:
-			level = slog.LevelWarn
-		}
-		logger.Log(r.Context(), level, "request", attrs...)
 	})
 }
 
@@ -1118,7 +1153,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.refuse(w, r, http.StatusBadRequest, fmt.Sprintf("Failed to read request body: %v", err),
-			"body_unreadable", "error", err.Error())
+			"body_unreadable", "error", cutRunes(err.Error(), 200))
 		return
 	}
 	defer r.Body.Close()
@@ -1139,7 +1174,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	parsedFlows, err := flow.ParseFlowsFromBytes(body)
 	if err != nil {
 		s.refuse(w, r, http.StatusBadRequest, fmt.Sprintf("Failed to parse flow JSON: %v", err),
-			"flow_json_invalid", "error", err.Error())
+			"flow_json_invalid", "error", cutRunes(err.Error(), 200))
 		return
 	}
 
@@ -1170,13 +1205,13 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	if dnsProfile != "" {
 		if _, err := generator.WithDNSProfile(dnsProfile); err != nil { // auto | kubernetes | openshift
-			s.refuse(w, r, http.StatusBadRequest, err.Error(), "dns_profile_invalid", "error", err.Error())
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "dns_profile_invalid", "error", cutRunes(err.Error(), 200))
 			return
 		}
 	}
 	if dnsResolver != "" {
 		if _, err := generator.WithDNSResolver(dnsResolver); err != nil { // <namespace>[/<label>=<value>]:<port>[/<proto>]
-			s.refuse(w, r, http.StatusBadRequest, err.Error(), "dns_resolver_invalid", "error", err.Error())
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "dns_resolver_invalid", "error", cutRunes(err.Error(), 200))
 			return
 		}
 	}
@@ -1193,10 +1228,10 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 			fmt.Sscanf(strings.TrimPrefix(err.Error(), policy.ErrNameNeedsOnePolicy.Error()+": got "), "%d", &n)
 			s.refuse(w, r, http.StatusBadRequest, err.Error(), "name_needs_single_policy", "policies", n)
 		case errors.Is(err, policy.ErrInvalidPolicy):
-			s.refuse(w, r, http.StatusBadRequest, err.Error(), "policy_invalid", "error", err.Error())
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "policy_invalid", "error", cutRunes(err.Error(), 200))
 		default:
 			s.refuse(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to generate policy: %v", err),
-				"generate_failed", "error", err.Error())
+				"generate_failed", "error", cutRunes(err.Error(), 200))
 		}
 		return
 	}
@@ -1232,7 +1267,7 @@ func (s *Server) handleYoloNs(w http.ResponseWriter, r *http.Request, bodyStr st
 	yamlBytes, err := policy.YOLONamespacePolicyYAML(namespace)
 	if err != nil {
 		s.refuse(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to generate YOLO policy: %v", err),
-			"generate_failed", "error", err.Error())
+			"generate_failed", "error", cutRunes(err.Error(), 200))
 		return
 	}
 
