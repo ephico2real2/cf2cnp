@@ -344,3 +344,97 @@ func TestGenerate_DNSProfile(t *testing.T) {
 		t.Fatalf("unknown profile must be a 400, got %d", rec.Code)
 	}
 }
+
+// the API page: the build's version beside the logo, one <details> card per endpoint with its own Try-it-out panel
+// (the operator, 2026-09-15: the cards were not clickable, the version was not shown, the try-out sat apart from the
+// endpoints), and the placeholder never reaches the browser
+func TestIndexPage_VersionAndTryItOut(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServerWithOptions(8080, "", Options{Version: "0.7.0"}).handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	if strings.Contains(page, "__CF2CNP_VERSION__") {
+		t.Fatalf("the version placeholder reached the page")
+	}
+	for _, want := range []string{
+		`<span class="version" title="cf2cnp's version, set when this binary was built">v0.7.0</span>`,
+		"<title>CF2CNP v0.7.0 - Cilium Flow to CiliumNetworkPolicy</title>",
+		`<details class="endpoint" id="ep-generate"`, `<details class="endpoint" id="ep-download"`, `<details class="endpoint" id="ep-health"`,
+		`id="flowInput"`, `id="downloadId"`, `onclick="sendDownload()"`, `onclick="sendHealth()"`, `id="healthResult"`,
+		"function onOpenGenerate", "function sendDownload", "function sendHealth",
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the page must contain %q", want)
+		}
+	}
+	if n := strings.Count(page, `<details class="endpoint"`); n != 3 {
+		t.Fatalf("three endpoint cards, got %d", n)
+	}
+	if n := strings.Count(page, "<h3>Try it out</h3>"); n != 3 {
+		t.Fatalf("a Try it out panel under each endpoint, got %d", n)
+	}
+	if strings.Contains(page, "<h2>Try it out</h2>") {
+		t.Fatalf("the separate Try it out section must be gone")
+	}
+}
+
+// the Try-it-out checkboxes must sit on the same line as their labels: the full-width input rule
+// used to catch them too (measured: each checkbox rendered as a block above its text)
+func TestIndexPage_CheckboxLabelsInline(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	for _, want := range []string{
+		`<label class="check"><input id="l7" type="checkbox">`,
+		`<label class="check"><input id="dnsVisibility" type="checkbox">`,
+		`.controls input[type=text], .controls input[type=password] {`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("the page must contain %q", want)
+		}
+	}
+	if strings.Contains(page, `.controls input {`) {
+		t.Fatalf("the old .controls input selector must be gone")
+	}
+}
+
+// the curl example must use the same base URL as download_url (externalURL, else the request)
+func TestIndexPage_CurlExampleUsesBaseURL(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "cf2cnp.example.test"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, req)
+	page := rec.Body.String()
+	if !strings.Contains(page, `curl -X POST https://cf2cnp.example.test/generate`) {
+		t.Fatalf("the curl example must use the request's base URL")
+	}
+	if strings.Contains(page, "localhost:8080") {
+		t.Fatalf("the hard-coded localhost must be gone")
+	}
+	if strings.Contains(page, "__CF2CNP_BASE__") {
+		t.Fatalf("the base URL placeholder reached the page")
+	}
+
+	rec = httptest.NewRecorder()
+	NewServer(8080, "https://fixed.example.test/prefix").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page = rec.Body.String()
+	if !strings.Contains(page, `https://fixed.example.test/prefix/generate`) {
+		t.Fatalf("externalURL must win: %s", page)
+	}
+}
+
+// displayVersion: what the three build paths hand main.version, and a local build
+func TestDisplayVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"":       "dev",    // go build with no -X
+		"dev":    "dev",    // main.go's default
+		"0.7.0":  "v0.7.0", // binary-release.yml: ${GITHUB_REF_NAME#v}
+		"v0.7.0": "v0.7.0", // docker-publish.yml on a tag: github.ref_name
+		"0123456789abcdef0123456789abcdef01234567": "0123456789ab", // docker-publish.yml off a tag: github.sha
+		" 0.7.0 ": "v0.7.0",
+	} {
+		if got := displayVersion(in); got != want {
+			t.Errorf("displayVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

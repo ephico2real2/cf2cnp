@@ -39,6 +39,7 @@ type Server struct {
 	authToken      string   // E6: when set, /generate and /download need Authorization: Bearer <token>
 	dnsProfile     string
 	dnsResolver    string
+	version        string // what the page shows beside the logo: main.version, set at build time (dev when unset)
 	cache          map[string]*CachedPolicy
 	mu             sync.RWMutex
 }
@@ -50,6 +51,7 @@ type Options struct {
 	AuthToken      string
 	DNSProfile     string
 	DNSResolver    string
+	Version        string // the build's version (main.version): the page's badge; "dev" when empty
 }
 
 // NewServer creates a new HTTP server. externalURL, when set, is the base URL clients reach the
@@ -68,11 +70,28 @@ func NewServerWithOptions(port int, externalURL string, opts Options) *Server {
 		authToken:      opts.AuthToken,
 		dnsProfile:     opts.DNSProfile,
 		dnsResolver:    opts.DNSResolver,
+		version:        displayVersion(opts.Version),
 		cache:          make(map[string]*CachedPolicy),
 	}
 	// Start cache cleanup goroutine
 	go s.cleanupCache()
 	return s
+}
+
+// displayVersion is the version the page shows: the release workflows build with "0.7.0" (binary-release strips the v)
+// or "v0.7.0" (docker-publish keeps the tag) or a commit sha (an untagged image), and a local build has none —
+// one "v" in front of a number, a sha cut to 12, "dev" for nothing
+func displayVersion(v string) string {
+	v = strings.TrimSpace(v)
+	switch {
+	case v == "":
+		return "dev"
+	case len(v) == 40 && strings.Trim(v, "0123456789abcdef") == "":
+		return v[:12]
+	case v[0] >= '0' && v[0] <= '9':
+		return "v" + v
+	}
+	return v
 }
 
 // cleanupCache removes expired cache entries
@@ -350,7 +369,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CF2CNP - Cilium Flow to CiliumNetworkPolicy</title>
+    <title>CF2CNP __CF2CNP_VERSION__ - Cilium Flow to CiliumNetworkPolicy</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
@@ -396,12 +415,36 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
             border-left: 4px solid #8b5cf6;
         }
         code { color: #06b6d4; }
+        /* each endpoint is a <details>: the method+path row is the click target (Swagger's collapsed rows), the
+           description and the Try-it-out panel unfold under it — native, keyboard-reachable, no script to toggle */
         .endpoint {
             background: #1e293b;
-            padding: 1rem;
             border-radius: 8px;
             margin: 1rem 0;
             border: 1px solid #334155;
+        }
+        .endpoint:hover { border-color: #8b5cf6; }
+        .endpoint > summary {
+            display: flex; align-items: center; gap: 0.75rem;
+            padding: 1rem; cursor: pointer; list-style: none;
+        }
+        .endpoint > summary::-webkit-details-marker { display: none; }
+        .endpoint > summary::after {
+            content: '▸'; margin-left: auto; color: #94a3b8; transition: transform 0.15s;
+        }
+        .endpoint[open] > summary::after { transform: rotate(90deg); }
+        .endpoint > summary .brief { color: #94a3b8; font-weight: normal; font-size: 0.95em; }
+        .endpoint > .body { padding: 0 1rem 1rem 1rem; border-top: 1px solid #334155; }
+        .endpoint > .body > p:first-child { margin-top: 1rem; }
+        .try { margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed #334155; }
+        .try h3 { margin: 0 0 0.5rem 0; color: #94a3b8; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.06em; }
+        .resp { color: #94a3b8; font-size: 0.9em; margin: 8px 0 4px 0; }
+        .resp .ok { color: #34d399; } .resp .bad { color: #f87171; }
+        .version {
+            display: inline-block; vertical-align: middle; margin-left: 0.6rem;
+            padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600;
+            color: #e2e8f0; background: #1e293b; border: 1px solid #334155; font-family: monospace;
+            -webkit-text-fill-color: #e2e8f0;   /* the h1 paints its text transparent for the gradient; the badge must not inherit that (measured: an empty pill) */
         }
         .method { 
             background: linear-gradient(135deg, #06b6d4, #8b5cf6);
@@ -451,7 +494,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         .muted { color: #64748b; font-weight: normal; }
         .controls { margin: 8px 0; }
         .controls label { display: block; margin-bottom: 4px; color: #cbd5e1; font-weight: 600; }
-        .controls input { width: 100%; box-sizing: border-box; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-family: monospace; }
+        .controls input[type=text], .controls input[type=password] { width: 100%; box-sizing: border-box; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-family: monospace; }
+        /* inline flow, not flex: flex made the bare text "Layer-7 rules" its own item and wrapped it (measured) */
+        .controls label.check { display: block; }
+        .controls label.check input { width: auto; vertical-align: middle; margin: 0 0.5rem 0 0; }
         .peers label { display: inline-block; margin: 4px 12px 4px 0; color: #cbd5e1; }
         .peers .muted { margin-left: 4px; }
         .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
@@ -497,69 +543,97 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
             </g>
         </svg>
         <div>
-            <h1>CF2CNP</h1>
+            <h1>CF2CNP <span class="version" title="cf2cnp's version, set when this binary was built">__CF2CNP_VERSION__</span></h1>
             <p class="subtitle">Cilium Flow to CiliumNetworkPolicy</p>
         </div>
     </div>
     <p>Generate CiliumNetworkPolicies from Hubble flow data.</p>
 
-    <h2>API Endpoints</h2>
-    
-    <div class="endpoint">
-        <span class="method">POST</span> <span class="path">/generate</span>
+    <h2>API Endpoints <span class="muted" style="font-size:0.7em">— click an endpoint to unfold it and try it out</span></h2>
+
+    <details class="endpoint" id="ep-generate" ontoggle="onOpenGenerate(this)">
+        <summary><span class="method">POST</span> <span class="path">/generate</span> <span class="brief">Hubble flows in, CiliumNetworkPolicies out</span></summary>
+        <div class="body">
         <p>Send Hubble flow JSON — one flow, a JSON array, or one flow per line — and receive the policies.
         <code>?name=&lt;name&gt;</code> names the (single) resulting policy.</p>
         <p><strong>Content-Type:</strong> application/json</p>
         <p><strong>Response:</strong> YAML (one document per policy) for curl; with <code>Accept: application/json</code>
         or <code>X-Grafana-Action</code>, JSON <code>{download_url, filename, yaml, flows, policies}</code></p>
-    </div>
+        <div class="try">
+        <h3>Try it out</h3>
+        <p>Paste Hubble flow JSON below — one flow, a JSON array, or one flow per line (the output of
+        <code>hubble observe -o json</code>). Flows to the same workload become one policy with one rule per peer.
+        The example is loaded the first time this unfolds; replace it with your own.</p>
+            <textarea id="flowInput" placeholder='{"flow": {"traffic_direction": "INGRESS", ...}}' oninput="summarize()"></textarea>
+            <div id="summary" class="summary"></div>
+            <div id="peers" class="peers"></div>
+            <div class="controls">
+                <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
+                <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
+                <label class="check"><input id="l7" type="checkbox"> Layer-7 rules <span class="muted">(HTTP method + path, DNS names, from flows that carry them; the port then goes through the proxy)</span></label>
+                <label class="check"><input id="dnsVisibility" type="checkbox"> DNS visibility <span class="muted">(world traffic without names: add the DNS resolver rule so the next flows carry names)</span></label>
+                <label for="dnsProfile">DNS resolver <span class="muted">(the rule toFQDNs and DNS visibility write: auto = from the observed DNS flows, else the server's default — kube-system/kube-dns:53 unless deployed otherwise; openshift = openshift-dns:5353)</span></label>
+                <select id="dnsProfile"><option value="auto">auto</option><option value="kubernetes">kubernetes</option><option value="openshift">openshift</option></select>
+                <label for="token">Access token <span class="muted">(only when the server requires one; kept in this tab's sessionStorage, never in the page)</span></label>
+                <input id="token" type="password" placeholder="Bearer token" spellcheck="false" oninput="try { sessionStorage.setItem('cf2cnp-token', this.value); } catch (e) {}">
+            </div>
+            <div class="buttons">
+                <button onclick="generatePolicy()">Generate Policy</button>
+                <button class="secondary" onclick="copyYAML()" id="copyBtn" disabled>Copy YAML</button>
+                <button class="secondary" onclick="downloadYAML()" id="downloadBtn" disabled>Download YAML</button>
+                <button class="secondary" onclick="loadExample()">Load example</button>
+                <button class="secondary" onclick="clearAll()">Clear</button>
+            </div>
+            <div id="apply" class="summary"></div>
+            <pre id="result"></pre>
+        </div>
+        </div>
+    </details>
 
-    <div class="endpoint">
-        <span class="method">GET</span> <span class="path">/download/{id}</span>
-        <p>Download a generated policy by ID.</p>
-    </div>
+    <details class="endpoint" id="ep-download">
+        <summary><span class="method">GET</span> <span class="path">/download/{id}</span> <span class="brief">a generated policy, by its id</span></summary>
+        <div class="body">
+        <p>Download a generated policy by ID. The id is the last path segment of the <code>download_url</code> a
+        <code>/generate</code> call returned; the server keeps a policy for an hour.</p>
+        <div class="try">
+        <h3>Try it out</h3>
+        <div class="controls">
+            <label for="downloadId">id <span class="muted">(filled in by the last /generate above)</span></label>
+            <input id="downloadId" type="text" placeholder="e.g. 8d5c2f1a3b9e" spellcheck="false">
+        </div>
+        <div class="buttons">
+            <button onclick="sendDownload()">Send</button>
+            <a id="downloadLink" class="muted" href="#" target="_blank" rel="noopener" style="display:none; align-self:center">open in a new tab</a>
+        </div>
+        <div id="downloadStatus" class="resp"></div>
+        <pre id="downloadResult"></pre>
+        </div>
+        </div>
+    </details>
 
-    <div class="endpoint">
-        <span class="method">GET</span> <span class="path">/health</span>
+    <details class="endpoint" id="ep-health">
+        <summary><span class="method">GET</span> <span class="path">/health</span> <span class="brief">is the server up</span></summary>
+        <div class="body">
         <p>Health check endpoint. Returns "OK" if the server is running.</p>
-    </div>
-
-    <h2>Try it out</h2>
-    <p>Paste Hubble flow JSON below — one flow, a JSON array, or one flow per line (the output of
-    <code>hubble observe -o json</code>). Flows to the same workload become one policy with one rule per peer.</p>
-    <textarea id="flowInput" placeholder='{"flow": {"traffic_direction": "INGRESS", ...}}' oninput="summarize()"></textarea>
-    <div id="summary" class="summary"></div>
-    <div id="peers" class="peers"></div>
-    <div class="controls">
-        <label for="policyName">Policy name <span class="muted">(optional, only when the flows make one policy)</span></label>
-        <input id="policyName" type="text" placeholder="e.g. shop-from-pos" spellcheck="false">
-        <label><input id="l7" type="checkbox"> Layer-7 rules <span class="muted">(HTTP method + path, DNS names, from flows that carry them; the port then goes through the proxy)</span></label>
-        <label><input id="dnsVisibility" type="checkbox"> DNS visibility <span class="muted">(world traffic without names: add the DNS resolver rule so the next flows carry names)</span></label>
-        <label for="dnsProfile">DNS resolver <span class="muted">(the rule toFQDNs and DNS visibility write: auto = from the observed DNS flows, else the server's default — kube-system/kube-dns:53 unless deployed otherwise; openshift = openshift-dns:5353)</span></label>
-        <select id="dnsProfile"><option value="auto">auto</option><option value="kubernetes">kubernetes</option><option value="openshift">openshift</option></select>
-        <label for="token">Access token <span class="muted">(only when the server requires one; kept in this tab's sessionStorage, never in the page)</span></label>
-        <input id="token" type="password" placeholder="Bearer token" spellcheck="false" oninput="try { sessionStorage.setItem('cf2cnp-token', this.value); } catch (e) {}">
-    </div>
-    <div class="buttons">
-        <button onclick="generatePolicy()">Generate Policy</button>
-        <button class="secondary" onclick="copyYAML()" id="copyBtn" disabled>Copy YAML</button>
-        <button class="secondary" onclick="downloadYAML()" id="downloadBtn" disabled>Download YAML</button>
-        <button class="secondary" onclick="loadExample()">Load example</button>
-        <button class="secondary" onclick="clearAll()">Clear</button>
-    </div>
-    <div id="apply" class="summary"></div>
-    <pre id="result"></pre>
+        <div class="try">
+        <h3>Try it out</h3>
+        <div class="buttons"><button onclick="sendHealth()">Send</button></div>
+        <div id="healthStatus" class="resp"></div>
+        <pre id="healthResult"></pre>
+        </div>
+        </div>
+    </details>
 
     <h2>Example using curl</h2>
     <pre><code># one flow
-curl -X POST http://localhost:8080/generate -H "Content-Type: application/json" -d @flow.json -o policy.yaml
+curl -X POST __CF2CNP_BASE__/generate -H "Content-Type: application/json" -d @flow.json -o policy.yaml
 
 # many flows at once: one policy per workload, one rule per peer
 hubble observe --namespace my-namespace --last 200 -o json > flows.json
-curl -X POST http://localhost:8080/generate --data-binary @flows.json -o policies.yaml
+curl -X POST __CF2CNP_BASE__/generate --data-binary @flows.json -o policies.yaml
 
 # name the resulting policy
-curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -o policy.yaml</code></pre>
+curl -X POST "__CF2CNP_BASE__/generate?name=shop-from-pos" -d @flow.json -o policy.yaml</code></pre>
 
     <script>
         // Parse what the textarea holds the way the server does: an array, or objects separated by whitespace.
@@ -639,6 +713,29 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
             } catch (e) { box.textContent = 'Not valid JSON yet: ' + e.message; }
         }
         let lastYAML = '', lastFilename = 'ciliumnetworkpolicy.yaml';
+        // Swagger's "Try it out" shows the example value: the flow textarea is filled the first time /generate unfolds (never over what was typed)
+        function onOpenGenerate(d) { if (d.open && !document.getElementById('flowInput').value.trim()) loadExample(); }
+        function authHeaders(h) { const token = document.getElementById('token').value.trim(); if (token) h['Authorization'] = 'Bearer ' + token; return h; }
+        // one response line the way Swagger shows it: the status, the time, then the body
+        function showResponse(statusId, resultId, response, body, ms) {
+            const st = document.getElementById(statusId); st.textContent = ''; const b = document.createElement('span');
+            b.className = response.ok ? 'ok' : 'bad'; b.textContent = 'HTTP ' + response.status + (response.statusText ? ' ' + response.statusText : ''); st.appendChild(b);
+            st.appendChild(document.createTextNode(' · ' + ms + ' ms' + (response.headers.get('content-type') ? ' · ' + response.headers.get('content-type') : '')));
+            document.getElementById(resultId).textContent = body;
+        }
+        async function sendDownload() {
+            const id = document.getElementById('downloadId').value.trim();
+            if (!id) { document.getElementById('downloadStatus').textContent = 'an id is needed — run /generate first, or paste one'; return; }
+            const url = '/download/' + encodeURIComponent(id); const t0 = performance.now();
+            try { const r = await fetch(url, { headers: authHeaders({}) }); showResponse('downloadStatus', 'downloadResult', r, await r.text(), Math.round(performance.now() - t0)); }
+            catch (e) { document.getElementById('downloadStatus').textContent = 'Error: ' + e.message; }
+            const a = document.getElementById('downloadLink'); a.href = url; a.style.display = '';
+        }
+        async function sendHealth() {
+            const t0 = performance.now();
+            try { const r = await fetch('/health'); showResponse('healthStatus', 'healthResult', r, await r.text(), Math.round(performance.now() - t0)); }
+            catch (e) { document.getElementById('healthStatus').textContent = 'Error: ' + e.message; }
+        }
         try { const t = sessionStorage.getItem('cf2cnp-token'); if (t) document.getElementById('token').value = t; } catch (e) {}
         async function generatePolicy() {
             const input = document.getElementById('flowInput').value;
@@ -658,6 +755,8 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
                 if (!response.ok) { result.textContent = 'Error: ' + await response.text(); apply.textContent = ''; setButtons(false); return; }
                 const data = await response.json();
                 lastYAML = data.yaml; lastFilename = data.filename; result.textContent = data.yaml;
+                // the id for /download/{id}'s Try it out: the last path segment of the download_url this call returned
+                if (data.download_url) { const seg = String(data.download_url).split('/').pop(); document.getElementById('downloadId').value = seg; document.getElementById('downloadLink').style.display = 'none'; }
                 apply.textContent = data.flows + ' flow(s) → ' + data.policies + (data.policies === 1 ? ' policy' : ' policies') + '. Review it, then: kubectl apply -f ' + data.filename;
                 setButtons(true);
             } catch (err) { result.textContent = 'Error: ' + err.message; setButtons(false); }
@@ -687,7 +786,10 @@ curl -X POST "http://localhost:8080/generate?name=shop-from-pos" -d @flow.json -
 </html>`
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(html))
+	w.Write([]byte(strings.NewReplacer(
+		"__CF2CNP_VERSION__", s.version,
+		"__CF2CNP_BASE__", s.baseURL(r),
+	).Replace(html)))
 }
 
 // handleHealth handles health check requests

@@ -249,6 +249,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	srv := server.NewServerWithOptions(port, externalURL, server.Options{
 		AllowedOrigins: origins, AuthToken: authToken, DNSProfile: serveDNSProfile, DNSResolver: serveDNSResolver,
+		Version: version,
 	})
 	return srv.Start()
 }
