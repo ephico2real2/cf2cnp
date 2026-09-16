@@ -586,7 +586,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         <h3>Try it out</h3>
         <p>Paste Hubble flow JSON below — one flow, a JSON array, or one flow per line (the output of
         <code>hubble observe -o json</code>). Flows to the same workload become one policy with one rule per peer.
-        The example is loaded the first time this unfolds; replace it with your own.</p>
+        The example is loaded whenever this unfolds with an empty box (so after Clear, too); replace it with your own.</p>
             <textarea id="flowInput" placeholder='{"flow": {"traffic_direction": "INGRESS", ...}}' oninput="summarize()"></textarea>
             <div id="summary" class="summary"></div>
             <div id="peers" class="peers"></div>
@@ -753,7 +753,9 @@ curl -X POST "__CF2CNP_BASE__/generate?name=shop-from-pos" -d @flow.json -o poli
             const url = '/download/' + encodeURIComponent(id); const t0 = performance.now();
             try { const r = await fetch(url, { headers: authHeaders({}) }); showResponse('downloadStatus', 'downloadResult', r, await r.text(), Math.round(performance.now() - t0)); }
             catch (e) { document.getElementById('downloadStatus').textContent = 'Error: ' + e.message; }
-            const a = document.getElementById('downloadLink'); a.href = url; a.style.display = '';
+            const a = document.getElementById('downloadLink'); a.href = url;
+            // a navigation sends no Authorization header, so a token-guarded server 401s even with the right token in #token
+            a.style.display = document.getElementById('token').value.trim() ? 'none' : '';
         }
         async function sendHealth() {
             const t0 = performance.now();
@@ -780,7 +782,7 @@ curl -X POST "__CF2CNP_BASE__/generate?name=shop-from-pos" -d @flow.json -o poli
                 const data = await response.json();
                 lastYAML = data.yaml; lastFilename = data.filename; result.textContent = data.yaml;
                 // the id for /download/{id}'s Try it out: the last path segment of the download_url this call returned
-                if (data.download_url) { const seg = String(data.download_url).split('/').pop(); document.getElementById('downloadId').value = seg; document.getElementById('downloadLink').style.display = 'none'; }
+                if (data.download_url) { const seg = String(data.download_url).split('/').pop(); document.getElementById('downloadId').value = seg; document.getElementById('downloadLink').style.display = 'none'; document.getElementById('downloadStatus').textContent = ''; document.getElementById('downloadResult').textContent = ''; }
                 apply.textContent = data.flows + ' flow(s) → ' + data.policies + (data.policies === 1 ? ' policy' : ' policies') + '. Review it, then: kubectl apply -f ' + data.filename;
                 setButtons(true);
             } catch (err) { result.textContent = 'Error: ' + err.message; setButtons(false); }
@@ -825,14 +827,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleDownload serves a cached policy file
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// Extract ID from path: /download/{id}
-	path := strings.TrimPrefix(r.URL.Path, "/download/")
-	if path == "" {
+	id := strings.TrimPrefix(r.URL.Path, "/download/")
+	if id == "" {
 		http.Error(w, "Missing download ID", http.StatusBadRequest)
+		return
+	}
+	if !validDownloadID(id) {
+		http.NotFound(w, r)
 		return
 	}
 
 	s.mu.RLock()
-	cached, exists := s.cache[path]
+	cached, exists := s.cache[id]
 	s.mu.RUnlock()
 
 	if !exists {

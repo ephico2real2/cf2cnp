@@ -517,3 +517,72 @@ func TestIndexPage_StatesActualCacheLifetime(t *testing.T) {
 		t.Fatalf("the hour claim must be gone")
 	}
 }
+
+func TestDownload_RejectsAnIDOutsideItsAlphabet(t *testing.T) {
+	s := NewServer(8080, "")
+	s.mu.Lock()
+	s.cache["a/b"] = &CachedPolicy{Content: []byte("slash-id"), Filename: "slash.yaml"}
+	s.cache["abc123"] = &CachedPolicy{Content: []byte("valid-id"), Filename: "valid.yaml"}
+	s.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	s.handleDownload(rec, httptest.NewRequest(http.MethodGet, "/download/a/b", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("id outside the alphabet: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleDownload(rec, httptest.NewRequest(http.MethodGet, "/download/abc123", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid id: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIndexPage_NewGenerateClearsTheDownloadPanel(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	start := strings.Index(page, "async function generatePolicy")
+	if start < 0 {
+		t.Fatal("generatePolicy not found")
+	}
+	rest := page[start+len("async function generatePolicy"):]
+	end := len(rest)
+	if i := strings.Index(rest, "async function"); i >= 0 && i < end {
+		end = i
+	}
+	if i := strings.Index(rest, "function "); i >= 0 && i < end {
+		end = i
+	}
+	fn := rest[:end]
+	for _, want := range []string{
+		"getElementById('downloadStatus').textContent = ''",
+		"getElementById('downloadResult').textContent = ''",
+	} {
+		if !strings.Contains(fn, want) {
+			t.Fatalf("generatePolicy must contain %q", want)
+		}
+	}
+}
+
+func TestIndexPage_DownloadLinkHiddenWithToken(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	want := `a.style.display = document.getElementById('token').value.trim() ? 'none' : ''`
+	if !strings.Contains(page, want) {
+		t.Fatalf("the page must contain %q", want)
+	}
+}
+
+func TestIndexPage_ExampleTextMatchesBehaviour(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewServer(8080, "").handleIndex(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	page := rec.Body.String()
+	if !strings.Contains(page, "whenever this unfolds with an empty box") {
+		t.Fatalf("the page must contain %q", "whenever this unfolds with an empty box")
+	}
+	if strings.Contains(page, "the first time this unfolds") {
+		t.Fatalf("the first-time claim must be gone")
+	}
+}

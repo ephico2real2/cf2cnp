@@ -56,3 +56,25 @@ request returns `/download/6576f3a5cad7aa14cb625e4edadeacee`.
 Eight claims: three refuted and fixed (C3 by both, C4 and C5 by Codex's measurements where Cursor had confirmed), one
 refutation rejected on scope (C2), one "not asked" applied. Cursor implemented the four fixes from a brief; the diff was
 read, the suite run (`go test ./... -count=1` green), and both security fixes measured against the rebuilt binary.
+
+## Second pass — on the fixed head `1cbfabd` (PR #3)
+
+The same two models on a 9-claim brief: (A) does each fix close its hole and open no other; (B) what the first pass never
+named — two generates in a row, the page behind the lab's Gateway, a token-protected server, the tests with the fixes
+reverted, curl users. Codex measured with `go test` and a Node VM driving the page's script; Cursor traced from source.
+
+| Claim | Codex | Cursor | Decision |
+|---|---|---|---|
+| C1 the escaping covers everything `validHost` admits | CONFIRMED (`h<>&"'=x` → all five escaped, three occurrences) | CONFIRMED | — |
+| C2 the download id is one safe segment end to end | REFUTED: `/download/a/b` still reaches `cache["a/b"]` in `handleDownload` | CONFIRMED | **Accepted** — defence in depth: `validDownloadID` in `handleDownload`, 404 |
+| C3 typed text is never lost | REFUTED: Clear → fold → unfold loads the example | CONFIRMED: intended — empty is the trigger | **Accepted as a text fix** — the card said "the first time"; it now says "whenever this unfolds with an empty box (so after Clear, too)" |
+| C4 "10 minutes" against a 5-minute ticker | CONFIRMED ((10, 15] minutes; 10 is the floor) | CONFIRMED | — |
+| C5 two generates in a row | REFUTED: the id and the YAML were current, `#downloadStatus`/`#downloadResult` still showed the previous download | CONFIRMED (missed the stale response) | **Accepted** — both cleared when a new id arrives |
+| C6 behind the Gateway, with and without `externalUrl` | CONFIRMED (three header traces) | CONFIRMED | — |
+| C7 a token-protected server | REFUTED: "open in a new tab" is a navigation, no bearer header → 401 | CONFIRMED, then volunteered the same | **Accepted** — the link is hidden when a token is in the field |
+| C8 the four tests fail with the fixes reverted | CONFIRMED (all four exit 1) | CONFIRMED (static) | — |
+| C9 curl users unchanged | CONFIRMED (YAML + Content-Disposition, bare OK, the JSON keys) | CONFIRMED | — |
+
+Cursor (agent mode) implemented the four from a brief; the diff read; `go test ./... -count=1` green; measured on the
+rebuilt binary: `GET /download/a/b` → 404; after a second generate the id changed and status/result cleared and the link
+hidden; with a token in the field, Send answers `HTTP 200 OK` through fetch and the link stays hidden. Fixes: `a733044`.
