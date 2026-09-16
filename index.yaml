@@ -2,6 +2,28 @@ apiVersion: v1
 entries:
   cf2cnp:
   - apiVersion: v2
+    appVersion: 0.9.0
+    created: "2026-09-16T08:59:49.179356723Z"
+    description: A Helm chart for CF2CNP - Cilium Flow to CiliumNetworkPolicy converter
+    digest: f4103680675b8d17fd129074600143cbc710e074210cd0a7586956c554a64990
+    home: https://github.com/onzack/cf2cnp
+    keywords:
+    - cilium
+    - network-policy
+    - hubble
+    - kubernetes
+    - security
+    maintainers:
+    - name: ONZACK
+      url: https://onzack.com
+    name: cf2cnp
+    sources:
+    - https://github.com/onzack/cf2cnp
+    type: application
+    urls:
+    - https://github.com/ephico2real2/cf2cnp/releases/download/cf2cnp-0.9.0/cf2cnp-0.9.0.tgz
+    version: 0.9.0
+  - apiVersion: v2
     appVersion: 0.8.0
     created: "2026-09-16T05:57:05.212157747Z"
     description: A Helm chart for CF2CNP - Cilium Flow to CiliumNetworkPolicy converter
@@ -177,4 +199,4 @@ entries:
     urls:
     - https://github.com/ephico2real2/cf2cnp/releases/download/cf2cnp-0.5.0/cf2cnp-0.5.0.tgz
     version: 0.5.0
-generated: "2026-09-16T05:57:05.212191199Z"
+generated: "2026-09-16T08:59:49.179375772Z"
