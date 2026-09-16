@@ -423,11 +423,14 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
             margin: 1rem 0;
             border: 1px solid #334155;
         }
-        .endpoint:hover { border-color: #8b5cf6; }
+        .endpoint { transition: border-color 0.2s, box-shadow 0.2s; }          /* the frontend-design skill: tactile states, 150–300 ms */
+        .endpoint:hover, .endpoint:focus-within { border-color: #8b5cf6; box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15); }
         .endpoint > summary {
-            display: flex; align-items: center; gap: 0.75rem;
-            padding: 1rem; cursor: pointer; list-style: none;
+            display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+            padding: 1rem; cursor: pointer; list-style: none; border-radius: 8px;
         }
+        .endpoint > summary:focus-visible { outline: 2px solid #06b6d4; outline-offset: -2px; }   /* the keyboard reaches every card */
+        @media (max-width: 640px) { .endpoint > summary .brief { flex-basis: 100%; } .endpoint > summary::after { margin-left: 0; } }
         .endpoint > summary::-webkit-details-marker { display: none; }
         .endpoint > summary::after {
             content: '▸'; margin-left: auto; color: #94a3b8; transition: transform 0.15s;
