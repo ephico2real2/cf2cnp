@@ -7,6 +7,24 @@ record where two independent reviewers (Cursor, Codex) went through the claims. 
 test summary on every push (the workflow's job summary): the unit tests by package, the 14 golden captures that must
 answer byte for byte, the CRD check, and `cf2cnp validate` over every golden output.
 
+## 0.8.0 — 2026-09-16 · the API page as a Swagger-like surface
+
+- The build's version beside the logo: `main.version` reaches the server through `Options.Version`; `displayVersion`
+  normalises the three build shapes (`0.8.0` → `v0.8.0`, a 40-hex sha → its first 12 chars, nothing → `dev`).
+- Each endpoint is a `<details>` card whose method + path row unfolds a Try-it-out panel: `/generate` carries the form
+  (controls unchanged; the example is loaded when the card unfolds with an empty box), `/download/{id}` an id filled
+  from the last generate's `download_url` with Send and an open-in-a-new-tab link, `/health` a Send — each panel shows
+  HTTP status · ms · content-type and the body. Checkboxes inline with their labels; the curl example on the page's
+  own base URL (`baseURL(r)`) instead of localhost:8080. Hover/focus-within transitions, a `:focus-visible` ring, no
+  horizontal overflow at 390 px.
+- From the two review passes ([docs/REVIEW_API-PAGE.md](docs/REVIEW_API-PAGE.md)): the version and the base URL
+  HTML-escaped at the sink (`X-Forwarded-Host: <svg>` had been served as markup); the download id is one path segment
+  of `[A-Za-z0-9_-]` — `validDownloadID` on the id the server mints, on `/download/{id}` (404 otherwise) and in the
+  panel; a new generate clears the previous download panel; the new-tab link is hidden when a token is in the field (a
+  navigation carries no bearer header); the card states the cache's real lifetime, 10 minutes (`cleanupCache`).
+- Fork PR #3 (develop). Twelve tests added in `internal/server/server_test.go`. No change to the CLI, the API
+  contract, or the generated policies: the 14 golden captures answer byte for byte.
+
 ## 0.7.0 — 2026-09-13 · Cilium's own policy types, validated the way the agent validates
 
 - **The policy document is `github.com/cilium/cilium/pkg/policy/api` at the pinned Cilium version (v1.20.1).** Every
