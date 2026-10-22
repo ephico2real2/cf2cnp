@@ -227,3 +227,39 @@ func TestAggregateFlows_CopiesLabels(t *testing.T) {
 		t.Fatal("no flows is an empty, non-nil result")
 	}
 }
+
+// A reply is never merged into a request (fork issue #13). Hubble reports a reply with the connection's
+// traffic_direction, so it shares the request's key only when both peers carry the same labels (replica-set members
+// talking to each other), and its destination_port is the client's ephemeral port. Merged, a reply arriving first
+// marked the request's flow a reply and BuildPolicies dropped it; a reply arriving second added its ephemeral port to
+// the request's rule. Kept apart, the request keeps its port alone in either order and the reply stays skippable.
+func TestAggregateFlows_KeepsRepliesApart(t *testing.T) {
+	peer := func(f *flow.ParsedFlow) {
+		f.Direction = "EGRESS"
+		f.SourceLabels = map[string]string{"app.kubernetes.io/name": "mongod"}
+		f.DestLabels = map[string]string{"app.kubernetes.io/name": "mongod"}
+	}
+	request := pf(peer, func(f *flow.ParsedFlow) { f.Port = 27017 })
+	reply := pf(peer, func(f *flow.ParsedFlow) { f.Port = 41234; f.IsReply = true })
+	for _, tc := range []struct {
+		name  string
+		flows []*flow.ParsedFlow
+	}{
+		{"reply then request", []*flow.ParsedFlow{reply, request}},
+		{"request then reply", []*flow.ParsedFlow{request, reply}},
+		{"request between replies", []*flow.ParsedFlow{reply, request, reply}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := map[bool]string{}
+			for _, a := range AggregateFlows(tc.flows) {
+				got[a.IsReply] = portList(a)
+			}
+			if len(got) != 2 || got[false] != "TCP/27017" || got[true] != "TCP/41234" {
+				t.Fatalf("want the request alone on TCP/27017 and the reply apart on TCP/41234, got %v", got)
+			}
+		})
+	}
+	if aggs := AggregateFlows([]*flow.ParsedFlow{reply, reply}); len(aggs) != 1 || !aggs[0].IsReply {
+		t.Fatalf("replies of one peer pair are one reply flow, got %d", len(aggs))
+	}
+}
