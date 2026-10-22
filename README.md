@@ -200,8 +200,9 @@ Example (json, three lines of one empty POST /generate):
 | `GET`  | `/health`     | Health check for the service                              | _none_                        | Status message      |
 | `GET`  | `/`           | The API page: each endpoint documented, with a Try-it-out panel under it ([The web UI](#the-web-ui)) | _none_                        | Web UI page         |
 
-The JSON answer is `{"download_url", "filename", "message", "flows", "policies", "yaml"}` — the YAML is in it, so a client
-need not follow the URL. `download_url` is built from `--external-url` when set, else from the request and the proxy
+The JSON answer is `{"download_url", "filename", "message", "flows", "policies", "warnings", "yaml"}` — the YAML is in
+it, so a client need not follow the URL. `warnings` lists the flows no policy can express and why (`[]` when none);
+the YAML opens with the same sentences as comments. `download_url` is built from `--external-url` when set, else from the request and the proxy
 headers a TLS-terminating ingress or gateway sets (`Forwarded: proto=…;host=…`, `X-Forwarded-Proto`, `X-Forwarded-Host`).
 
 #### Example: Using curl

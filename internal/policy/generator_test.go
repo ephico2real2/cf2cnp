@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -267,9 +269,16 @@ func firstRules(ps []*CiliumNetworkPolicy) *L7Rules {
 }
 
 // E2: HTTP REQUEST records become anchored, escaped method+path rules; only with WithL7. The fixture is a
-// measured request through the Gateway (GET https://bankapi.poc.local/api/balance/chk-1001, demo 15).
+// measured request through the Gateway (GET https://bankapi.poc.local/api/balance/chk-1001, demo 15): the record
+// the Gateway's Envoy (reserved:ingress) emitted on its EGRESS side, which since fork issue #7 is skipped — no pod
+// to select — so the test reads it as the INGRESS record of the same request at api in bank.
 func TestBuildPolicies_L7HTTPRules(t *testing.T) {
-	ps, err := NewGenerator("").WithL7().BuildPolicies(load(t, "l7-http-request.json"))
+	raw := bytes.Replace(fixture(t, "l7-http-request.json"), []byte(`"traffic_direction": "EGRESS"`), []byte(`"traffic_direction": "INGRESS"`), 1)
+	flows, err := flow.ParseFlowsFromBytes(raw)
+	if err != nil || len(flows) != 1 || flows[0].Direction != "INGRESS" || flows[0].SourceEntity != "ingress" {
+		t.Fatalf("the fixture must read as the INGRESS record from reserved:ingress: %+v %v", flows, err)
+	}
+	ps, err := NewGenerator("").WithL7().BuildPolicies(aggregator.AggregateFlows(flows))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,10 +286,20 @@ func TestBuildPolicies_L7HTTPRules(t *testing.T) {
 	if rules == nil || len(rules.HTTP) != 1 || rules.HTTP[0].Method != "GET" || rules.HTTP[0].Path != `^/api/balance/chk-1001(\?.*)?$` {
 		t.Fatalf("expected one escaped GET rule for the measured path allowing a query, got %+v", rules)
 	}
-	plain, _ := NewGenerator("").BuildPolicies(load(t, "l7-http-request.json"))
+	plain, _ := NewGenerator("").BuildPolicies(aggregator.AggregateFlows(flows))
 	if out, _ := EncodePolicies(plain); strings.Contains(string(out), "http:") {
 		t.Fatalf("without WithL7 the output must be layer-4 only:\n%s", out)
 	}
+}
+
+// fixture is one testdata file's bytes
+func fixture(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // E2: a DNS REQUEST yields matchName without the trailing dot; a DNS RESPONSE is the reply side and yields no rule
@@ -405,5 +424,128 @@ func TestBuildPolicies_WorldSourceIsFromCIDR(t *testing.T) {
 	}
 	if err := Validate(ps[0]); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Fork issue #7: the Gateway's Envoy (reserved:ingress, identity 8) calling api-gateway is two Hubble flows of one
+// connection — INGRESS at the pod, EGRESS at the ingress endpoint. 0.9.0 turned the EGRESS one into a policy named
+// `unknown` in namespace `default` with an EMPTY endpointSelector (every endpoint of `default`, applied). A reserved
+// identity has no pod to select: the egress flow is skipped with a warning, the ingress policy is the whole answer.
+// The fixture is written after the issue's report (demo 41), not captured.
+func TestBuildPolicies_SkipsEgressFromReservedSource(t *testing.T) {
+	g := NewGenerator("")
+	ps, err := g.BuildPolicies(load(t, "edge-ingress-to-api-gateway.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 1 || ps[0].Metadata.Name != "api-gateway" || ps[0].Metadata.Namespace != "shop-edge" {
+		names := make([]string, 0, len(ps))
+		for _, p := range ps {
+			names = append(names, p.Metadata.Namespace+"/"+p.Metadata.Name+" selector="+mustYAML(p.Spec.EndpointSelector))
+		}
+		t.Fatalf("a reserved:ingress source must yield the ingress policy only, got %v", names)
+	}
+	if from := ps[0].Spec.Ingress[0].FromEntities; len(from) != 1 || from[0] != "ingress" {
+		t.Fatalf("the ingress policy must be fromEntities: [ingress], got %s", mustYAML(ps[0].Spec.Ingress[0]))
+	}
+	ws := g.Warnings()
+	if len(ws) != 1 || !strings.Contains(ws[0], "EGRESS flow from reserved:ingress to api-gateway in shop-edge on TCP/80 skipped") || !strings.Contains(ws[0], "reserved identity reserved:ingress") {
+		t.Fatalf("one warning naming the skipped flow and the reserved identity, got %q", ws)
+	}
+	// the YAML answer opens with the warning as comments, and stays one valid document
+	_, out, err := g.GeneratePoliciesWithYAML(load(t, "edge-ingress-to-api-gateway.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(out), "# WARNING: 1 flow(s) skipped, no generated policy covers them:\n# - EGRESS flow from reserved:ingress") {
+		t.Fatalf("the YAML must open with the warning:\n%s", out)
+	}
+	docs, err := DecodePolicyDocuments(out)
+	if err != nil || len(docs) != 1 || docs[0].Metadata.Name != "api-gateway" {
+		t.Fatalf("the commented YAML must still decode to the one policy: %d %v", len(docs), err)
+	}
+	if err := Validate(docs[0]); err != nil {
+		t.Fatal(err)
+	}
+	// a run with nothing left is refused like an all-replies run, and says why
+	egressOnly := load(t, "edge-ingress-to-api-gateway.json")[:1]
+	if egressOnly[0].Direction != "EGRESS" {
+		t.Fatalf("the aggregator orders EGRESS first, got %s", egressOnly[0].Direction)
+	}
+	_, err = NewGenerator("").BuildPolicies(egressOnly)
+	if !errors.Is(err, ErrNothingGenerated) || !strings.Contains(err.Error(), "reserved:ingress") {
+		t.Fatalf("every flow skipped must be ErrNothingGenerated with the reason, got %v", err)
+	}
+	// a second run starts with a clean slate
+	if _, err := g.BuildPolicies(load(t, "ingress-pos-to-shop.json")); err != nil || len(g.Warnings()) != 0 {
+		t.Fatalf("warnings must be per run, got %v %v", g.Warnings(), err)
+	}
+}
+
+// Review (Codex P1): a warning carries the flow's own text, which no Validate has seen. A line break in a crafted
+// namespace ended the comment and started a document that decoded, validated and bypassed every generator check;
+// six separators yaml reads as line breaks. The answer must stay the one policy, the warning one comment line.
+func TestWarningsHeader_CannotInjectDocuments(t *testing.T) {
+	injected, err := EncodePolicies([]*CiliumNetworkPolicy{YOLONamespacePolicy("victim")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sep := range []string{"\n", "\r", "\r\n", "\u0085", " ", " "} {
+		fs := load(t, "edge-ingress-to-api-gateway.json") // [0] is the skipped EGRESS flow: its namespace is in the warning
+		fs[0].DestNamespace = "edge" + sep + "---" + sep + strings.ReplaceAll(string(injected), "\n", sep) + sep + "---" + sep + "# tail"
+		ps, out, err := NewGenerator("").GeneratePoliciesWithYAML(fs)
+		if err != nil || len(ps) != 1 {
+			t.Fatalf("%q: %v %d", sep, err, len(ps))
+		}
+		docs, err := DecodePolicyDocuments(out)
+		if err != nil || len(docs) != 1 || docs[0].Metadata.Name != "api-gateway" {
+			t.Fatalf("%q: the warning must not add a document: decoded %d, err %v\n%s", sep, len(docs), err, out)
+		}
+		if bytes.Count(out, []byte("\n# - ")) != 1 || !strings.Contains(string(out), `edge\`) {
+			t.Fatalf("%q: the separator must be escaped inside one comment line:\n%s", sep, out)
+		}
+	}
+}
+
+// Review (Codex P2): the CLI's artifacts — generate's files, merge's output — said nothing about skipped flows; only
+// stderr did, which a policy PR does not keep. Each file now opens with the run's warnings. MergeDocument keeps a
+// file's comments, so the next run must replace the block (or remove it when it skipped nothing): a warning that
+// outlives its flow would be a lie. Codex's own fix only skipped an identical header and left a stale one in place.
+func TestGeneratePolicies_FilesCarryTheRunsWarnings(t *testing.T) {
+	dir := t.TempDir()
+	g := NewGenerator(dir)
+	if err := g.GeneratePolicies(load(t, "edge-ingress-to-api-gateway.json")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "shop-edge-api-gateway.yaml"))
+	if err != nil || !strings.HasPrefix(string(b), "# WARNING: 1 flow(s) skipped, no generated policy covers them:\n# - EGRESS flow from reserved:ingress") {
+		t.Fatalf("the file must open with the warning: %v\n%s", err, b)
+	}
+	docs, err := DecodePolicyDocuments(b)
+	if err != nil || len(docs) != 1 {
+		t.Fatalf("decode: %d %v", len(docs), err)
+	}
+	if err := Validate(docs[0]); err != nil {
+		t.Fatal(err)
+	}
+	merged, _, err := MergeDocument(b, docs[0])
+	if err != nil || !strings.HasPrefix(string(merged), "# WARNING: 1 flow(s) skipped") {
+		t.Fatalf("MergeDocument keeps the comment at the head: %v\n%s", err, merged)
+	}
+	if again := g.AnnotateWarnings(b); !bytes.Equal(again, b) {
+		t.Fatalf("the same run annotates idempotently:\n%s", again)
+	}
+	clean := NewGenerator("")
+	if _, err := clean.BuildPolicies(load(t, "ingress-pos-to-shop.json")); err != nil || len(clean.Warnings()) != 0 {
+		t.Fatal(err)
+	}
+	if out := clean.AnnotateWarnings(merged); strings.Contains(string(out), "# WARNING") || !strings.HasPrefix(string(out), "apiVersion:") {
+		t.Fatalf("a run that skipped nothing must remove the previous warning:\n%s", out)
+	}
+	other := NewGenerator("")
+	other.warnings = []string{"another run's reason"}
+	out := string(other.AnnotateWarnings(merged))
+	if strings.Count(out, "# WARNING:") != 1 || !strings.HasPrefix(out, "# WARNING: 1 flow(s) skipped, no generated policy covers them:\n# - another run's reason\napiVersion:") {
+		t.Fatalf("a different warning must replace the old block, not stack on it:\n%s", out)
 	}
 }

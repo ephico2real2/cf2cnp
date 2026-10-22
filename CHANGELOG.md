@@ -7,6 +7,21 @@ record where two independent reviewers (Cursor, Codex) went through the claims. 
 test summary on every push (the workflow's job summary): the unit tests by package, the 14 golden captures that must
 answer byte for byte, the CRD check, and `cf2cnp validate` over every golden output.
 
+## Unreleased
+
+- **No egress policy for a reserved-identity source** (fork issue #7): a flow whose source is a reserved identity
+  (`reserved:ingress` — the Gateway's Envoy —, `host`, `remote-node`, `world`, …) has no pod and no namespace, so its
+  EGRESS record used to become a policy named `unknown` in namespace `default` with an **empty `endpointSelector`**,
+  which applied would have selected every endpoint of `default`. The flow is now skipped with a warning; the INGRESS
+  record of the same connection yields the destination's `fromEntities` policy as before.
+- **Warnings are part of the answer:** `Generator.Warnings()` lists what a run skipped and why; `/generate` returns
+  them as `warnings` (`[]` when none) in the JSON answer and as a `# WARNING:` comment block at the head of the YAML;
+  the CLI prints them on stderr, and every file `generate` writes and the file `merge` writes open with the same block
+  — a later run replaces it with its own, or removes it when it skipped nothing. The text of a warning is escaped
+  (`strconv.Quote`) so a line break in a crafted flow cannot end the comment and smuggle a document past the checks.
+  A run that skips every flow is refused — `400` on the API (plain text, log reason `nothing_generated`, as every
+  refusal), exit 1 on the CLI — with the reasons. The 14 golden captures answer byte for byte (none has a skipped flow).
+
 ## 0.9.0 — 2026-09-16 · every request and every refusal in the log; the download says which of three things happened
 
 - **Structured logging** on the HTTP server (`log/slog`, no extra library): `--log-format` (`text` / `json`, env

@@ -90,7 +90,9 @@ jobs:
         run: |
           set -eu
           out=$(mktemp -d)
-          /tmp/cf2cnp generate --input internal/testdata/l7-http-request.json --output "$out"
+          # The INGRESS record of the Gateway request: its EGRESS record (l7-http-request.json) comes from reserved:ingress,
+          # which has no pod, so it yields no policy since #7 (TestBuildPolicies_SkipsEgressFromReservedSource).
+          /tmp/cf2cnp generate --input internal/testdata/l7-http-request-ingress.json --output "$out"
           existing=$(find "$out" -name '*.yaml' | head -1)
-          /tmp/cf2cnp merge --l7 --existing "$existing" --input internal/testdata/l7-http-request.json --output "$out/merged.yaml"
+          /tmp/cf2cnp merge --l7 --existing "$existing" --input internal/testdata/l7-http-request-ingress.json --output "$out/merged.yaml"
           grep -q 'http:' "$out/merged.yaml"
