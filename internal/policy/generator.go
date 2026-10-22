@@ -144,7 +144,9 @@ func (g *Generator) WithName(name string) *Generator {
 // BuildPolicies turns aggregated flows into policies: one per flow, then flows that select the same
 // workload (same namespace, name and endpointSelector) are merged into one object carrying every
 // rule. Reply flows are skipped; if every flow is a reply, ErrReplyFlow is returned. A flow no policy can
-// express is skipped with a sentence in Warnings (skipReason); if that leaves nothing, ErrNothingGenerated.
+// express is skipped with a sentence in Warnings (skipReason), a port no toPorts rule can carry is left out of
+// its flow (splitPorts); if that leaves nothing, ErrNothingGenerated. A generated policy whose selector would
+// match every endpoint is refused (ErrInvalidPolicy) — never emitted silently (fork issue #10).
 func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*CiliumNetworkPolicy, error) {
 	g.warnings = nil // per run, whatever the run's outcome
 	allReplies := true
@@ -169,6 +171,18 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 			g.warnings = append(g.warnings, reason)
 			continue
 		}
+		kept, dropped := splitPorts(f.Ports)
+		for _, p := range dropped {
+			g.warnings = append(g.warnings, fmt.Sprintf("%s skipped: %s", describeFlow(f, []aggregator.PortInfo{p}), portlessReason(p)))
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		if len(dropped) > 0 {
+			pruned := *f // the caller's flow stays as observed; the policy is written from the ports a rule can carry
+			pruned.Ports = kept
+			f = &pruned
+		}
 		policies = append(policies, g.GeneratePolicy(f))
 	}
 	if len(policies) == 0 && len(g.warnings) > 0 {
@@ -176,6 +190,9 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 	}
 	policies = mergePolicies(policies, g.dnsRule())
 	for _, p := range policies {
+		if err := refuseAllMatching(p); err != nil {
+			return nil, err
+		}
 		if err := Validate(p); err != nil {
 			return nil, err
 		}
@@ -551,17 +568,124 @@ func (g *Generator) GeneratePolicy(f *aggregator.AggregatedFlow) *CiliumNetworkP
 // select: 0.9.0 answered it with a policy named `unknown` in namespace `default` whose endpointSelector was empty,
 // which applied would have selected every endpoint of `default` (fork issue #7). The INGRESS flow of the same
 // connection, observed at the destination, is the one that becomes a policy (fromEntities / fromCIDR).
+//
+// A workload with none of the identifying labels (flow.IdentifyingLabels: a bare pod, a job without an app label)
+// gets `matchLabels: {}`. As the endpointSelector that applies the policy to every endpoint of the namespace; as a
+// fromEndpoints / toEndpoints peer in the policy's own namespace and cluster it allows every endpoint of that
+// namespace. Neither is what the flow said, so the flow is skipped and the warning names the labels to add (fork
+// issue #10). A peer in ANOTHER namespace keeps its namespace label and stays a rule (every endpoint of that
+// namespace — what Cilium's own OpenShift DNS example writes for openshift-dns, which carries no app label).
 func skipReason(f *aggregator.AggregatedFlow) string {
 	if f.Direction != "INGRESS" && f.IsSourceEntity {
 		return fmt.Sprintf("%s skipped: the source is the reserved identity reserved:%s (no pod, no namespace), so no endpoint exists for an egress policy to select; the destination's ingress policy is the one to apply",
-			describeFlow(f), f.SourceEntity)
+			describeFlow(f, f.Ports), f.SourceEntity)
+	}
+	labels := "none of the labels cf2cnp selects a workload by (" + strings.Join(flow.IdentifyingLabels(), ", ") + ")"
+	if f.Direction == "INGRESS" {
+		if len(f.DestLabels) == 0 {
+			return fmt.Sprintf("%s skipped: the destination carries %s, so the endpointSelector would match every endpoint of namespace %s",
+				describeFlow(f, f.Ports), labels, policyNamespace(f.DestNamespace))
+		}
+		if !f.IsSourceEntity && len(ingressPeerLabels(f)) == 0 {
+			return fmt.Sprintf("%s skipped: the source carries %s and names no other namespace or cluster, so the fromEndpoints selector would be empty and allow every endpoint of the policy's namespace",
+				describeFlow(f, f.Ports), labels)
+		}
+		return ""
+	}
+	if len(f.SourceLabels) == 0 {
+		return fmt.Sprintf("%s skipped: the source carries %s, so the endpointSelector would match every endpoint of namespace %s",
+			describeFlow(f, f.Ports), labels, policyNamespace(f.SourceNamespace))
+	}
+	if !f.IsDestEntityTraffic && !f.IsWorldTraffic && len(egressPeerLabels(f)) == 0 {
+		return fmt.Sprintf("%s skipped: the destination carries %s and names no other namespace or cluster, so the toEndpoints selector would be empty and allow every endpoint of the policy's namespace",
+			describeFlow(f, f.Ports), labels)
 	}
 	return ""
 }
 
-// describeFlow names an aggregated flow for a warning: "EGRESS flow from reserved:ingress to api-gateway in
-// shop-edge on TCP/80"
-func describeFlow(f *aggregator.AggregatedFlow) string {
+// policyNamespace is the namespace a generated policy lands in: the workload's, or kubectl's `default` when the
+// flow names none (Validate checks the object the same way)
+func policyNamespace(ns string) string {
+	if ns == "" {
+		return "default"
+	}
+	return ns
+}
+
+// splitPorts separates the ports a toPorts rule can carry (TCP, UDP, SCTP — api.L4Proto's port protocols — on a port
+// 1-65535) from the rest: ICMP, which has no port, a flow without an l4 record, and a port outside that range. 0.9.0
+// wrote `port: "0"` with an empty protocol for the first two; a transport flow with destination_port 0 (or none) wrote
+// `port: "0"` with its protocol, which Cilium reads as EVERY port of it (PortProtocol.sanitize's isZero,
+// testutils/simulate.go's wildcard) — the opposite of what the flow said (review, Codex P1). Cilium's `icmps` block is not written: it must be a rule of its own (Sanitize refuses it
+// beside toPorts), it has no port for the aggregator and the merge to key on, and the agent accepts it only with
+// enable-icmp-rules — a warning the reader can act on beats a rule the admission may refuse.
+func splitPorts(ports []aggregator.PortInfo) (kept, dropped []aggregator.PortInfo) {
+	for _, p := range ports {
+		switch strings.ToUpper(p.Protocol) {
+		case "TCP", "UDP", "SCTP":
+			if p.Port >= 1 && p.Port <= 65535 {
+				kept = append(kept, p)
+			} else {
+				dropped = append(dropped, p)
+			}
+		default:
+			dropped = append(dropped, p)
+		}
+	}
+	return kept, dropped
+}
+
+// portlessReason says why a port splitPorts dropped cannot be a toPorts rule
+func portlessReason(p aggregator.PortInfo) string {
+	switch strings.ToUpper(p.Protocol) {
+	case "TCP", "UDP", "SCTP":
+		return fmt.Sprintf("%s destination port %d is not a port (1-65535); port 0 would allow every %s port", p.Protocol, p.Port, p.Protocol)
+	}
+	if p.Protocol == "" {
+		return "the flow carries no TCP, UDP or SCTP port (no l4 record), so no toPorts rule can say it"
+	}
+	return fmt.Sprintf("%s has no port and cf2cnp writes no icmps rule; add one by hand if the workload needs it", p.Protocol)
+}
+
+// refuseAllMatching is the last line of defence behind skipReason: a generated policy whose endpointSelector, or
+// whose fromEndpoints / toEndpoints peer, has neither matchLabels nor matchExpressions matches every endpoint of a
+// namespace, and is never emitted (fork issue #10). Validate does not check this: `endpointSelector: {}` is a
+// legitimate thing to write by hand (the YOLO policy does), not a legitimate thing to generate from a flow.
+func refuseAllMatching(p *CiliumNetworkPolicy) error {
+	refuse := func(what string) error {
+		return fmt.Errorf("%w %s/%s: %s matches every endpoint, which no observed flow says; the workload carries none of the labels cf2cnp selects by (%s)",
+			ErrInvalidPolicy, p.Metadata.Namespace, p.Metadata.Name, what, strings.Join(flow.IdentifyingLabels(), ", "))
+	}
+	if allMatching(p.Spec.EndpointSelector) {
+		return refuse("endpointSelector")
+	}
+	for i, r := range p.Spec.Ingress {
+		for j, es := range r.FromEndpoints {
+			if allMatching(es) {
+				return refuse(fmt.Sprintf("ingress[%d].fromEndpoints[%d]", i, j))
+			}
+		}
+	}
+	for i, r := range p.Spec.Egress {
+		for j, es := range r.ToEndpoints {
+			if allMatching(es) {
+				return refuse(fmt.Sprintf("egress[%d].toEndpoints[%d]", i, j))
+			}
+		}
+	}
+	return nil
+}
+
+// allMatching reports whether a selector has nothing to match on. A peer selector that carries only the namespace
+// label (cross-namespace traffic) is as open within that namespace, but it is a selector that says a namespace;
+// skipReason refuses the flow before it gets here.
+func allMatching(es EndpointSelector) bool {
+	return es.LabelSelector == nil || (len(es.MatchLabels) == 0 && len(es.MatchExpressions) == 0)
+}
+
+// describeFlow names an aggregated flow for a warning, on the given ports: "EGRESS flow from reserved:ingress to
+// api-gateway in shop-edge on TCP/80"
+func describeFlow(f *aggregator.AggregatedFlow, ports []aggregator.PortInfo) string {
 	source := sideName(f.SourceLabels, f.SourceNamespace)
 	if f.IsSourceEntity {
 		source = "reserved:" + f.SourceEntity
@@ -578,7 +702,7 @@ func describeFlow(f *aggregator.AggregatedFlow) string {
 	case f.IsDestEntityTraffic:
 		dest = "reserved:" + f.DestEntity
 	}
-	return fmt.Sprintf("%s flow from %s to %s on %s", f.Direction, source, dest, flowPorts(f.Ports))
+	return fmt.Sprintf("%s flow from %s to %s on %s", f.Direction, source, dest, flowPorts(ports))
 }
 
 // sideName names a workload side of a flow by its identifying labels and namespace, the way the description does
@@ -593,11 +717,19 @@ func sideName(labels map[string]string, namespace string) string {
 	return name
 }
 
-// flowPorts renders an aggregated flow's ports as "TCP/80, UDP/53"
+// flowPorts renders an aggregated flow's ports as "TCP/80, UDP/53"; a protocol without a port by its name, no
+// protocol at all as what it is
 func flowPorts(ports []aggregator.PortInfo) string {
 	names := make([]string, 0, len(ports))
 	for _, p := range ports {
-		names = append(names, fmt.Sprintf("%s/%d", p.Protocol, p.Port))
+		switch {
+		case p.Protocol == "":
+			names = append(names, "no L4 port")
+		case p.Port == 0:
+			names = append(names, p.Protocol)
+		default:
+			names = append(names, fmt.Sprintf("%s/%d", p.Protocol, p.Port))
+		}
 	}
 	return strings.Join(names, ", ")
 }
@@ -629,24 +761,26 @@ func (g *Generator) generateEndpointIngressRules(policy *CiliumNetworkPolicy, f 
 	// Create ingress rule
 	ingressRule := IngressRule{}
 
-	// From endpoints with source labels
-	fromLabels := copyLabels(f.SourceLabels)
-
-	// Add namespace label if cross-namespace traffic
-	if f.SourceNamespace != "" && f.SourceNamespace != f.DestNamespace {
-		fromLabels[flow.GetNamespaceLabel()] = f.SourceNamespace
-	}
-	// ClusterMesh (E1): name the peer's cluster, or the rule matches the local cluster only
-	if c := peerCluster(f.DestCluster, f.SourceCluster); c != "" {
-		fromLabels[ClusterLabel] = c
-	}
-
-	ingressRule.FromEndpoints = []EndpointSelector{Selector(fromLabels)}
+	ingressRule.FromEndpoints = []EndpointSelector{Selector(ingressPeerLabels(f))}
 
 	// Add port rules
 	ingressRule.ToPorts = g.portRules(f)
 
 	policy.Spec.Ingress = []IngressRule{ingressRule}
+}
+
+// ingressPeerLabels are the matchLabels of an ingress rule's fromEndpoints: the source's identifying labels, its
+// namespace when it is not the policy's (cross-namespace traffic), its cluster when it is not the local one
+// (ClusterMesh, E1: without it the rule matches the local cluster only)
+func ingressPeerLabels(f *aggregator.AggregatedFlow) map[string]string {
+	fromLabels := copyLabels(f.SourceLabels)
+	if f.SourceNamespace != "" && f.SourceNamespace != f.DestNamespace {
+		fromLabels[flow.GetNamespaceLabel()] = f.SourceNamespace
+	}
+	if c := peerCluster(f.DestCluster, f.SourceCluster); c != "" {
+		fromLabels[ClusterLabel] = c
+	}
+	return fromLabels
 }
 
 // generateEntityIngressRules generates entity-based ingress rules (from remote-node, host, etc.). A world source
@@ -771,24 +905,24 @@ func (g *Generator) generateEntityEgressRules(policy *CiliumNetworkPolicy, f *ag
 func (g *Generator) generateEndpointEgressRules(policy *CiliumNetworkPolicy, f *aggregator.AggregatedFlow) {
 	egressRule := EgressRule{}
 
-	// To endpoints with destination labels
-	toLabels := copyLabels(f.DestLabels)
-
-	// Add namespace label if cross-namespace traffic
-	if f.DestNamespace != "" && f.DestNamespace != f.SourceNamespace {
-		toLabels[flow.GetNamespaceLabel()] = f.DestNamespace
-	}
-	// ClusterMesh (E1): name the peer's cluster, or the rule matches the local cluster only
-	if c := peerCluster(f.SourceCluster, f.DestCluster); c != "" {
-		toLabels[ClusterLabel] = c
-	}
-
-	egressRule.ToEndpoints = []EndpointSelector{Selector(toLabels)}
+	egressRule.ToEndpoints = []EndpointSelector{Selector(egressPeerLabels(f))}
 
 	// Add port rules
 	egressRule.ToPorts = g.portRules(f)
 
 	policy.Spec.Egress = []EgressRule{egressRule}
+}
+
+// egressPeerLabels are the matchLabels of an egress rule's toEndpoints, as ingressPeerLabels for the destination
+func egressPeerLabels(f *aggregator.AggregatedFlow) map[string]string {
+	toLabels := copyLabels(f.DestLabels)
+	if f.DestNamespace != "" && f.DestNamespace != f.SourceNamespace {
+		toLabels[flow.GetNamespaceLabel()] = f.DestNamespace
+	}
+	if c := peerCluster(f.SourceCluster, f.DestCluster); c != "" {
+		toLabels[ClusterLabel] = c
+	}
+	return toLabels
 }
 
 // generateDescription creates a human-readable description for the policy

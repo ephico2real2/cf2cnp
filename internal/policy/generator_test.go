@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -547,5 +548,131 @@ func TestGeneratePolicies_FilesCarryTheRunsWarnings(t *testing.T) {
 	out := string(other.AnnotateWarnings(merged))
 	if strings.Count(out, "# WARNING:") != 1 || !strings.HasPrefix(out, "# WARNING: 1 flow(s) skipped, no generated policy covers them:\n# - another run's reason\napiVersion:") {
 		t.Fatalf("a different warning must replace the old block, not stack on it:\n%s", out)
+	}
+}
+
+// rawFlows parses inline Hubble JSON (one flow per line) and aggregates it
+func rawFlows(t *testing.T, ndjson string) []*aggregator.AggregatedFlow {
+	t.Helper()
+	flows, err := flow.ParseFlowsFromBytes([]byte(ndjson))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return aggregator.AggregateFlows(flows)
+}
+
+// Fork issue #10: a workload with none of the identifying labels (a bare pod, a job) got `matchLabels: {}`. As the
+// endpointSelector the policy would have applied to every endpoint of the namespace; as a same-namespace peer the
+// rule would have allowed every endpoint of it. Both flows are skipped with a warning that names the labels to add.
+// A peer in ANOTHER namespace keeps its namespace label and stays a rule (openshift-dns carries no app label).
+func TestBuildPolicies_SkipsUnlabelledWorkloads(t *testing.T) {
+	bare := func(direction, srcLabels, dstLabels, dstNS string) string {
+		return `{"flow":{"uuid":"x","traffic_direction":"` + direction + `","is_reply":false,"l4":{"TCP":{"destination_port":8080}},
+		  "source":{"namespace":"lab","labels":[` + srcLabels + `"k8s:io.kubernetes.pod.namespace=lab"]},
+		  "destination":{"namespace":"` + dstNS + `","labels":[` + dstLabels + `"k8s:io.kubernetes.pod.namespace=` + dstNS + `"]}}}`
+	}
+	labelled := `"k8s:app=api",`
+	cases := []struct {
+		name, ndjson, warning string
+	}{
+		{"ingress to a bare pod", bare("INGRESS", labelled, "", "lab"), "the destination carries none of the labels cf2cnp selects a workload by (app.kubernetes.io/name, app.kubernetes.io/component, app.kubernetes.io/instance, app, k8s-app, name, component, instance), so the endpointSelector would match every endpoint of namespace lab"},
+		{"ingress from a bare pod in the same namespace", bare("INGRESS", "", labelled, "lab"), "the source carries none of the labels cf2cnp selects a workload by (app.kubernetes.io/name, app.kubernetes.io/component, app.kubernetes.io/instance, app, k8s-app, name, component, instance) and names no other namespace or cluster, so the fromEndpoints selector would be empty"},
+		{"egress from a bare pod", bare("EGRESS", "", labelled, "lab"), "the source carries none of the labels cf2cnp selects a workload by (app.kubernetes.io/name, app.kubernetes.io/component, app.kubernetes.io/instance, app, k8s-app, name, component, instance), so the endpointSelector would match every endpoint of namespace lab"},
+		{"egress to a bare pod in the same namespace", bare("EGRESS", labelled, "", "lab"), "the destination carries none of the labels cf2cnp selects a workload by (app.kubernetes.io/name, app.kubernetes.io/component, app.kubernetes.io/instance, app, k8s-app, name, component, instance) and names no other namespace or cluster, so the toEndpoints selector would be empty"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := NewGenerator("")
+			ps, err := g.BuildPolicies(rawFlows(t, c.ndjson))
+			if !errors.Is(err, ErrNothingGenerated) {
+				out, _ := EncodePolicies(ps)
+				t.Fatalf("must be skipped (ErrNothingGenerated), got err=%v policies:\n%s", err, out)
+			}
+			if ws := g.Warnings(); len(ws) != 1 || !strings.Contains(ws[0], c.warning) {
+				t.Fatalf("warning must say why and name the labels:\n got %q\nwant …%s…", ws, c.warning)
+			}
+		})
+	}
+	// a bare peer in another namespace is a namespace-scoped selector, not an empty one: kept, no warning
+	g := NewGenerator("")
+	ps, err := g.BuildPolicies(rawFlows(t, bare("EGRESS", labelled, "", "openshift-dns")))
+	if err != nil || len(ps) != 1 || len(g.Warnings()) != 0 {
+		t.Fatalf("a cross-namespace peer without labels stays a rule: %v %d %v", err, len(ps), g.Warnings())
+	}
+	if to := ps[0].Spec.Egress[0].ToEndpoints[0].MatchLabels; len(to) != 1 || to[flow.GetNamespaceLabel()] != "openshift-dns" {
+		t.Fatalf("expected the namespace label only, got %v", to)
+	}
+	// the last line of defence: a generated policy with an empty selector is refused whatever produced it
+	if err := refuseAllMatching(YOLONamespacePolicy("dev")); !errors.Is(err, ErrInvalidPolicy) || !strings.Contains(err.Error(), "endpointSelector matches every endpoint") {
+		t.Fatalf("an empty endpointSelector must be refused, got %v", err)
+	}
+	if err := refuseAllMatching(ps[0]); err != nil {
+		t.Fatalf("a selector with labels passes: %v", err)
+	}
+	if err := Validate(YOLONamespacePolicy("dev")); err != nil {
+		t.Fatalf("Validate stays what it was — a hand-written empty selector is valid: %v", err)
+	}
+}
+
+// Fork issue #10: an ICMP flow has no port; 0.9.0 wrote `port: "0"` with an empty protocol. The ICMP port is left out
+// of its flow with a warning (the TCP ports of the same peer pair stay), an ICMP-only flow is skipped; SCTP is a port
+// protocol and becomes a rule.
+func TestBuildPolicies_SkipsICMPKeepsSCTP(t *testing.T) {
+	line := func(l4 string) string {
+		return `{"flow":{"uuid":"x","traffic_direction":"EGRESS","is_reply":false,"l4":` + l4 + `,
+		  "source":{"namespace":"lab","labels":["k8s:app=api","k8s:io.kubernetes.pod.namespace=lab"]},
+		  "destination":{"namespace":"lab","labels":["k8s:app=db","k8s:io.kubernetes.pod.namespace=lab"]}}}`
+	}
+	g := NewGenerator("")
+	ps, err := g.BuildPolicies(rawFlows(t, line(`{"ICMPv4":{"type":8,"code":0}}`)+"\n"+line(`{"TCP":{"destination_port":5432}}`)+"\n"+line(`{"SCTP":{"destination_port":3868}}`)))
+	if err != nil || len(ps) != 1 {
+		t.Fatalf("one policy from the TCP and SCTP ports: %v %d", err, len(ps))
+	}
+	if ports := ps[0].Spec.Egress[0].ToPorts[0].Ports; len(ports) != 2 || ports[0].Port != "3868" || ports[0].Protocol != "SCTP" || ports[1].Port != "5432" || ports[1].Protocol != "TCP" {
+		t.Fatalf("expected SCTP/3868 and TCP/5432, got %s", mustYAML(ports))
+	}
+	if err := Validate(ps[0]); err != nil {
+		t.Fatal(err)
+	}
+	ws := g.Warnings()
+	if len(ws) != 1 || ws[0] != "EGRESS flow from api in lab to db in lab on ICMPv4 skipped: ICMPv4 has no port and cf2cnp writes no icmps rule; add one by hand if the workload needs it" {
+		t.Fatalf("one warning for the ICMP port, got %q", ws)
+	}
+	// ICMP only: nothing to write
+	_, err = NewGenerator("").BuildPolicies(rawFlows(t, line(`{"ICMPv6":{"type":128,"code":0}}`)))
+	if !errors.Is(err, ErrNothingGenerated) || !strings.Contains(err.Error(), "on ICMPv6 skipped") {
+		t.Fatalf("an ICMP-only flow must be ErrNothingGenerated, got %v", err)
+	}
+	// no l4 at all: the same, said differently
+	_, err = NewGenerator("").BuildPolicies(rawFlows(t, line(`{}`)))
+	if !errors.Is(err, ErrNothingGenerated) || !strings.Contains(err.Error(), "on no L4 port skipped: the flow carries no TCP, UDP or SCTP port") {
+		t.Fatalf("a flow without l4 must be ErrNothingGenerated, got %v", err)
+	}
+}
+
+// Review (Codex P1): a TCP/UDP/SCTP flow with destination_port 0 (or none) passed BuildPolicies and Validate as
+// `port: "0"` — which Cilium reads as every port of the protocol (PortProtocol.sanitize's isZero, simulate.go's
+// wildcard) — and a port above 65535 refused the whole run. Both are left out with a warning; a valid sibling port stays.
+func TestBuildPolicies_SkipsPortsOutOfRange(t *testing.T) {
+	for _, proto := range []string{"TCP", "UDP", "SCTP"} {
+		for _, port := range []int{0, -1, 65536} {
+			t.Run(fmt.Sprintf("%s/%d", proto, port), func(t *testing.T) {
+				fs := rawFlows(t, fmt.Sprintf(`{"flow":{"traffic_direction":"EGRESS","source":{"namespace":"lab","labels":["k8s:app=client"]},"destination":{"namespace":"lab","labels":["k8s:app=server"]},"l4":{"%s":{"destination_port":%d}}}}`, proto, port))
+				g := NewGenerator("")
+				_, err := g.BuildPolicies(fs)
+				want := fmt.Sprintf("%s destination port %d is not a port (1-65535); port 0 would allow every %s port", proto, port, proto)
+				if !errors.Is(err, ErrNothingGenerated) || !strings.Contains(err.Error(), want) {
+					t.Fatalf("the port must be skipped with its reason, got %v", err)
+				}
+				fs[0].Ports = append(fs[0].Ports, aggregator.PortInfo{Port: 443, Protocol: "TCP"})
+				ps, err := g.BuildPolicies(fs)
+				if err != nil || len(ps) != 1 || len(g.Warnings()) != 1 {
+					t.Fatalf("the valid sibling port must stay, with one warning: %v %d %v", err, len(ps), g.Warnings())
+				}
+				if ports := ps[0].Spec.Egress[0].ToPorts[0].Ports; len(ports) != 1 || ports[0].Port != "443" {
+					t.Fatalf("only TCP/443 may remain, got %s", mustYAML(ports))
+				}
+			})
+		}
 	}
 }
