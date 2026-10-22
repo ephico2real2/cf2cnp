@@ -62,10 +62,26 @@ type IP struct {
 	IPVersion   string `json:"ipVersion"`
 }
 
-// L4 contains Layer 4 protocol information
+// L4 contains Layer 4 protocol information — Hubble's Layer4 oneof (api/v1/flow/flow.proto): TCP, UDP, ICMPv4,
+// ICMPv6 or SCTP, by the proto field names Hubble writes
 type L4 struct {
-	TCP *TCPInfo `json:"TCP,omitempty"`
-	UDP *UDPInfo `json:"UDP,omitempty"`
+	TCP    *TCPInfo  `json:"TCP,omitempty"`
+	UDP    *UDPInfo  `json:"UDP,omitempty"`
+	ICMPv4 *ICMPInfo `json:"ICMPv4,omitempty"`
+	ICMPv6 *ICMPInfo `json:"ICMPv6,omitempty"`
+	SCTP   *SCTPInfo `json:"SCTP,omitempty"`
+}
+
+// ICMPInfo is Hubble's ICMPv4 / ICMPv6 record: a type and a code, no port
+type ICMPInfo struct {
+	Type int `json:"type"`
+	Code int `json:"code"`
+}
+
+// SCTPInfo is Hubble's SCTP record: ports like TCP (chunk_type is not read)
+type SCTPInfo struct {
+	SourcePort      int `json:"source_port"`
+	DestinationPort int `json:"destination_port"`
 }
 
 // TCPInfo contains TCP-specific information
@@ -129,8 +145,8 @@ type ParsedFlow struct {
 	DestIP              string            // Destination IP for CIDR-based rules
 	SourceIP            string            // 0.7.0: the source's address when the source is reserved:world (fromCIDR)
 	DestEntity          string            // Reserved entity (kube-apiserver, host, world, etc.)
-	Protocol            string            // TCP or UDP
-	Port                int               // Destination port
+	Protocol            string            // TCP, UDP or SCTP (a port protocol); ICMPv4 or ICMPv6 (no port); "" when the flow has no l4
+	Port                int               // Destination port (0 for ICMP and for a flow without l4)
 	IsWorldTraffic      bool              // True if destination is "world"
 	IsDestEntityTraffic bool              // True if destination is a reserved entity
 	IsReply             bool              // True if this is a reply packet

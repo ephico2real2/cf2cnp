@@ -3,6 +3,7 @@ package flow
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -93,5 +94,38 @@ func TestParseFlowsFromBytes_RejectsNonFlows(t *testing.T) {
 	two := good + string(fixture(t, "ingress-stranger-to-shop.json")) // two objects, no separator
 	if fs, err := ParseFlowsFromBytes([]byte(two)); err != nil || len(fs) != 2 {
 		t.Fatalf("two concatenated flows: %d %v", len(fs), err)
+	}
+}
+
+// Fork issue #10: 0.9.0 read only TCP and UDP, so an SCTP, ICMPv4 or ICMPv6 flow (Hubble's Layer4 oneof) parsed to
+// port 0 with an empty protocol and became `port: "0"` in a policy. SCTP has ports and is in the CRD's enum; ICMP has
+// none and is named so the generator can say what it skips.
+func TestParseFlow_SCTPAndICMP(t *testing.T) {
+	base := fixture(t, "ingress-pos-to-shop.json")
+	tcp := regexp.MustCompile(`"l4":\{"TCP":\{[^}]*\{[^}]*\}\}\}`).FindString(string(base))
+	if tcp == "" {
+		t.Fatalf("fixture changed, no TCP l4 record found")
+	}
+	cases := []struct {
+		l4       string
+		protocol string
+		port     int
+	}{
+		{`"l4":{"SCTP":{"source_port":36412,"destination_port":3868,"chunk_type":"DATA"}}`, "SCTP", 3868},
+		{`"l4":{"ICMPv4":{"type":8,"code":0}}`, "ICMPv4", 0},
+		{`"l4":{"ICMPv6":{"type":128,"code":0}}`, "ICMPv6", 0},
+		{`"l4":{}`, "", 0},
+	}
+	for _, c := range cases {
+		flows, err := ParseFlowsFromBytes([]byte(strings.Replace(string(base), tcp, c.l4, 1)))
+		if err != nil {
+			t.Fatalf("%s: %v", c.l4, err)
+		}
+		if flows[0].Protocol != c.protocol || flows[0].Port != c.port {
+			t.Fatalf("%s: got %s/%d, want %s/%d", c.l4, flows[0].Protocol, flows[0].Port, c.protocol, c.port)
+		}
+	}
+	if got := IdentifyingLabels(); len(got) != len(priorityLabels)+len(fallbackLabels) || got[0] != "app.kubernetes.io/name" || got[len(got)-1] != "instance" {
+		t.Fatalf("IdentifyingLabels must list the priority then the fallback keys, got %v", got)
 	}
 }

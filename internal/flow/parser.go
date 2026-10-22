@@ -182,13 +182,23 @@ func parseFlow(flow *Flow) (*ParsedFlow, error) {
 	}
 
 	// Parse L4 protocol and port
-	// Always use destination_port - this is the port being accessed on the destination
-	if flow.L4.TCP != nil {
+	// Always use destination_port - this is the port being accessed on the destination. SCTP has ports like TCP and
+	// is in the CRD's protocol enum. ICMP has none: the protocol is named so the generator can say what it skips
+	// (fork issue #10; 0.9.0 left both at port 0 with an empty protocol).
+	switch {
+	case flow.L4.TCP != nil:
 		parsed.Protocol = "TCP"
 		parsed.Port = flow.L4.TCP.DestinationPort
-	} else if flow.L4.UDP != nil {
+	case flow.L4.UDP != nil:
 		parsed.Protocol = "UDP"
 		parsed.Port = flow.L4.UDP.DestinationPort
+	case flow.L4.SCTP != nil:
+		parsed.Protocol = "SCTP"
+		parsed.Port = flow.L4.SCTP.DestinationPort
+	case flow.L4.ICMPv4 != nil:
+		parsed.Protocol = "ICMPv4"
+	case flow.L4.ICMPv6 != nil:
+		parsed.Protocol = "ICMPv6"
 	}
 
 	// Layer 7 (E2): only REQUEST records describe what the client asked for; a RESPONSE is the reply
@@ -328,6 +338,12 @@ func getReservedEntity(labels []string) string {
 // GetNamespaceLabel returns the namespace label for cross-namespace traffic
 func GetNamespaceLabel() string {
 	return "io.kubernetes.pod.namespace"
+}
+
+// IdentifyingLabels are the label keys a workload is selected by, priority first then fallback — the generator
+// names them when a peer carries none (fork issue #10)
+func IdentifyingLabels() []string {
+	return append(append([]string(nil), priorityLabels...), fallbackLabels...)
 }
 
 // inferTrafficDirection infers the traffic direction when not explicitly set

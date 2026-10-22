@@ -16,11 +16,34 @@ answer byte for byte, the CRD check, and `cf2cnp validate` over every golden out
   record of the same connection yields the destination's `fromEntities` policy as before.
 - **Warnings are part of the answer:** `Generator.Warnings()` lists what a run skipped and why; `/generate` returns
   them as `warnings` (`[]` when none) in the JSON answer and as a `# WARNING:` comment block at the head of the YAML;
+<<<<<<< HEAD
   the CLI prints them on stderr, and every file `generate` writes and the file `merge` writes open with the same block
   — a later run replaces it with its own, or removes it when it skipped nothing. The text of a warning is escaped
   (`strconv.Quote`) so a line break in a crafted flow cannot end the comment and smuggle a document past the checks.
   A run that skips every flow is refused — `400` on the API (plain text, log reason `nothing_generated`, as every
   refusal), exit 1 on the CLI — with the reasons. The 14 golden captures answer byte for byte (none has a skipped flow).
+=======
+  the CLI prints them on stderr. A run that skips every flow is refused — `400` (reason `nothing_generated`) on the
+  API, exit 1 on the CLI — with the reasons. The 14 golden captures answer byte for byte (none has a skipped flow).
+- **Never an all-matching selector** (fork issue #10): a workload with none of the identifying labels
+  (`app.kubernetes.io/name`, `app.kubernetes.io/component`, `app.kubernetes.io/instance`, `app`, `k8s-app`, `name`,
+  `component`, `instance`) used to get `matchLabels: {}` — as the endpointSelector, every endpoint of the namespace; as
+  a same-namespace peer, every endpoint allowed. Such a flow is skipped with a warning that names the labels to add. A
+  peer in another namespace keeps its namespace label and stays a rule (OpenShift's `openshift-dns` carries no app
+  label). Behind the skip, every generated policy is checked once more: an empty `endpointSelector`, `fromEndpoints` or
+  `toEndpoints` is refused (`400`, exit 1), never written. `cf2cnp validate` is unchanged — a hand-written `{}` is
+  still valid, as the YOLO policy relies on.
+- **ICMP and SCTP flows:** the parser reads Hubble's whole `l4` oneof. SCTP has ports and is in the CRD's protocol
+  enum, so an SCTP flow becomes a `protocol: SCTP` port rule. ICMPv4 / ICMPv6 have no port: the ICMP part of a flow
+  is left out with a warning (the TCP/UDP ports of the same peers stay), and no `icmps` rule is written — Cilium wants
+  it as a rule of its own, apart from `toPorts`, and only with `enable-icmp-rules`. 0.9.0 wrote `port: "0"` with an
+  empty protocol for both. A TCP/UDP/SCTP flow whose destination port is outside 1-65535 (0 when Hubble recorded
+  none) is left out the same way: `port: "0"` is every port of the protocol to Cilium, the opposite of what the flow
+  said; 0.9.0 wrote it, and refused the whole run for a port above 65535.
+- **Tests:** `internal/aggregator/aggregator_test.go` (grouping by direction, namespaces, labels, clusters, entities and
+  FQDNs; port merging and order; L7 per port), `TestParseFlow_SCTPAndICMP`, `TestBuildPolicies_SkipsUnlabelledWorkloads`,
+  `TestBuildPolicies_SkipsICMPKeepsSCTP`.
+>>>>>>> bdb4920 (10)
 
 ## 0.9.0 — 2026-09-16 · every request and every refusal in the log; the download says which of three things happened
 
