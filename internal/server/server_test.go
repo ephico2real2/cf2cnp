@@ -904,3 +904,33 @@ func TestRefused_ErrorAttrIsCut(t *testing.T) {
 		t.Fatalf("error attr is %d runes, want ≤ 200", n)
 	}
 }
+
+// Fork issue #7: a flow no policy can express is reported, not silently dropped — `warnings` in the JSON answer, a
+// comment block at the head of the YAML; and when nothing is left, a 400 that says why
+func TestGenerate_WarningsForSkippedFlows(t *testing.T) {
+	s := NewServer(8080, "")
+	both := fixture(t, "edge-ingress-to-api-gateway.json")
+	m := jsonBody(t, post(t, s, "/generate", both, map[string]string{"Accept": "application/json"}))
+	ws, _ := m["warnings"].([]interface{})
+	if m["policies"].(float64) != 1 || len(ws) != 1 || !strings.Contains(ws[0].(string), "reserved:ingress") {
+		t.Fatalf("one policy and one warning naming reserved:ingress: %v", m)
+	}
+	if y := m["yaml"].(string); !strings.HasPrefix(y, "# WARNING: 1 flow(s) skipped") || strings.Count(y, "kind: CiliumNetworkPolicy") != 1 {
+		t.Fatalf("the yaml carries the warning as a comment and one policy:\n%s", y)
+	}
+	rec := post(t, s, "/generate", both, nil)
+	if rec.Code != 200 || !strings.HasPrefix(rec.Body.String(), "# WARNING: 1 flow(s) skipped") {
+		t.Fatalf("direct mode: %d %s", rec.Code, rec.Body.String())
+	}
+	// a clean run answers an empty list, not null
+	m = jsonBody(t, post(t, s, "/generate", fixture(t, "ingress-pos-to-shop.json"), map[string]string{"Accept": "application/json"}))
+	if ws, ok := m["warnings"].([]interface{}); !ok || len(ws) != 0 {
+		t.Fatalf("warnings must be [] when nothing was skipped: %v", m["warnings"])
+	}
+	// the egress flow alone: nothing generated, 400 with the reason
+	egress := strings.Split(strings.TrimSpace(both), "\n")[1]
+	rec = post(t, s, "/generate", egress, nil)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "every flow was skipped") || !strings.Contains(rec.Body.String(), "reserved:ingress") {
+		t.Fatalf("egress from a reserved identity alone: %d %s", rec.Code, rec.Body.String())
+	}
+}

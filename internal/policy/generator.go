@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"encoding/json"
@@ -46,6 +47,10 @@ var ErrNameNeedsOnePolicy = errors.New("a policy name can only be set when the f
 // agent's sentence, not a 500
 var ErrInvalidPolicy = errors.New("invalid CiliumNetworkPolicy")
 
+// ErrNothingGenerated is returned when every flow that was not a reply was skipped (see Warnings); the reasons follow
+// the sentence, so a 400 or an exit 1 says what was wrong with the capture
+var ErrNothingGenerated = errors.New("no policy generated: every flow was skipped")
+
 // Generator generates CiliumNetworkPolicies from aggregated flows
 type Generator struct {
 	outputDir     string
@@ -55,6 +60,14 @@ type Generator struct {
 	dnsProfile    string       // 0.7.0: auto (from the flows), kubernetes or openshift
 	dnsResolver   *DNSResolver // 0.7.0: an explicit --dns-resolver, over the profile
 	resolver      DNSResolver  // the resolver of the current BuildPolicies run
+	warnings      []string     // what the current BuildPolicies run skipped, one sentence each (fork issue #7)
+}
+
+// Warnings are the sentences of the last BuildPolicies run about what it did not write: a flow it skipped and why.
+// They go into the JSON answer (`warnings`), to the head of the YAML as comments and to the CLI's stderr, because a
+// policy that is silently missing is a hole no reader of the output would notice (fork issue #7).
+func (g *Generator) Warnings() []string {
+	return append([]string(nil), g.warnings...)
 }
 
 // WithDNSVisibility adds the kube-dns L7 DNS rule to a world policy that has no names, so that the DNS
@@ -130,8 +143,10 @@ func (g *Generator) WithName(name string) *Generator {
 
 // BuildPolicies turns aggregated flows into policies: one per flow, then flows that select the same
 // workload (same namespace, name and endpointSelector) are merged into one object carrying every
-// rule. Reply flows are skipped; if every flow is a reply, ErrReplyFlow is returned.
+// rule. Reply flows are skipped; if every flow is a reply, ErrReplyFlow is returned. A flow no policy can
+// express is skipped with a sentence in Warnings (skipReason); if that leaves nothing, ErrNothingGenerated.
 func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*CiliumNetworkPolicy, error) {
+	g.warnings = nil // per run, whatever the run's outcome
 	allReplies := true
 	for _, f := range flows {
 		if !f.IsReply {
@@ -150,7 +165,14 @@ func (g *Generator) BuildPolicies(flows []*aggregator.AggregatedFlow) ([]*Cilium
 		if f.IsReply {
 			continue
 		}
+		if reason := skipReason(f); reason != "" {
+			g.warnings = append(g.warnings, reason)
+			continue
+		}
 		policies = append(policies, g.GeneratePolicy(f))
+	}
+	if len(policies) == 0 && len(g.warnings) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrNothingGenerated, strings.Join(g.warnings, "; "))
 	}
 	policies = mergePolicies(policies, g.dnsRule())
 	for _, p := range policies {
@@ -457,7 +479,36 @@ func (g *Generator) GeneratePoliciesWithYAML(flows []*aggregator.AggregatedFlow)
 	if err != nil {
 		return nil, nil, err
 	}
-	return policies, out, nil
+	return policies, g.AnnotateWarnings(out), nil
+}
+
+// AnnotateWarnings puts the run's warnings at the head of a YAML artifact as comments — the API answer, each file
+// generate writes, merge's output — in place of the block an earlier run left there. MergeDocument keeps a file's
+// comments, so a warning would otherwise outlive the flow that caused it: the file says what the LAST run skipped,
+// and nothing when it skipped nothing (review, Codex P2).
+func (g *Generator) AnnotateWarnings(out []byte) []byte {
+	return append(warningsHeader(g.warnings), warningsBlock.ReplaceAll(out, nil)...)
+}
+
+// warningsBlock is the comment block warningsHeader writes, wherever a previous run left it
+var warningsBlock = regexp.MustCompile(`(?m)^# WARNING: \d+ flow\(s\) skipped, no generated policy covers them:\n(?:# - [^\n]*\n)*`)
+
+// warningsHeader is the comment block that opens a YAML artifact when flows were skipped, so the file a user applies
+// says what it does not cover; nothing when every flow became a rule (the golden captures stay byte for byte)
+func warningsHeader(warnings []string) []byte {
+	if len(warnings) == 0 {
+		return nil
+	}
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "# WARNING: %d flow(s) skipped, no generated policy covers them:\n", len(warnings))
+	for _, w := range warnings {
+		// a warning carries the flow's own text (a namespace, a label value, a name) that no Validate has seen: a line
+		// break in it would end the comment and start a document that bypasses every check (review, Codex P1).
+		// strconv.Quote escapes every control character and YAML line separator and leaves printable text alone.
+		q := strconv.Quote(w)
+		fmt.Fprintf(&b, "# - %s\n", q[1:len(q)-1])
+	}
+	return b.Bytes()
 }
 
 // EncodePolicies renders policies as a multi-document YAML stream with the world/CIDR comment where it applies
@@ -491,6 +542,64 @@ func (g *Generator) GeneratePolicy(f *aggregator.AggregatedFlow) *CiliumNetworkP
 	}
 
 	return policy
+}
+
+// skipReason says why BuildPolicies writes no policy for the flow, or "" when it writes one.
+//
+// A flow whose SOURCE is a reserved identity (reserved:ingress — the Gateway's Envoy, identity 8 —, host,
+// remote-node, world, …) has no pod and no namespace on that side, so there is nothing an EGRESS policy could
+// select: 0.9.0 answered it with a policy named `unknown` in namespace `default` whose endpointSelector was empty,
+// which applied would have selected every endpoint of `default` (fork issue #7). The INGRESS flow of the same
+// connection, observed at the destination, is the one that becomes a policy (fromEntities / fromCIDR).
+func skipReason(f *aggregator.AggregatedFlow) string {
+	if f.Direction != "INGRESS" && f.IsSourceEntity {
+		return fmt.Sprintf("%s skipped: the source is the reserved identity reserved:%s (no pod, no namespace), so no endpoint exists for an egress policy to select; the destination's ingress policy is the one to apply",
+			describeFlow(f), f.SourceEntity)
+	}
+	return ""
+}
+
+// describeFlow names an aggregated flow for a warning: "EGRESS flow from reserved:ingress to api-gateway in
+// shop-edge on TCP/80"
+func describeFlow(f *aggregator.AggregatedFlow) string {
+	source := sideName(f.SourceLabels, f.SourceNamespace)
+	if f.IsSourceEntity {
+		source = "reserved:" + f.SourceEntity
+		if len(f.SourceIPs) > 0 {
+			source += " (" + strings.Join(f.SourceIPs, ", ") + ")"
+		}
+	}
+	dest := sideName(f.DestLabels, f.DestNamespace)
+	switch {
+	case f.IsWorldTraffic && len(f.DestFQDNs) > 0:
+		dest = strings.Join(f.DestFQDNs, ", ")
+	case f.IsWorldTraffic && len(f.DestIPs) > 0:
+		dest = strings.Join(f.DestIPs, ", ")
+	case f.IsDestEntityTraffic:
+		dest = "reserved:" + f.DestEntity
+	}
+	return fmt.Sprintf("%s flow from %s to %s on %s", f.Direction, source, dest, flowPorts(f.Ports))
+}
+
+// sideName names a workload side of a flow by its identifying labels and namespace, the way the description does
+func sideName(labels map[string]string, namespace string) string {
+	name := describeSelector(labels)
+	if len(labels) == 0 {
+		name = "an endpoint without identifying labels"
+	}
+	if namespace != "" {
+		name += " in " + namespace
+	}
+	return name
+}
+
+// flowPorts renders an aggregated flow's ports as "TCP/80, UDP/53"
+func flowPorts(ports []aggregator.PortInfo) string {
+	names := make([]string, 0, len(ports))
+	for _, p := range ports {
+		names = append(names, fmt.Sprintf("%s/%d", p.Protocol, p.Port))
+	}
+	return strings.Join(names, ", ")
 }
 
 // generateIngressPolicy generates an ingress policy
@@ -825,7 +934,7 @@ func (g *Generator) writePolicyWithComment(policy *CiliumNetworkPolicy, needsCID
 	if needsCIDRComment {
 		addToCIDRComment(buf)
 	}
-	if err := os.WriteFile(filePath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(filePath, g.AnnotateWarnings(buf.Bytes()), 0644); err != nil {
 		return fmt.Errorf("failed to write policy file: %w", err)
 	}
 

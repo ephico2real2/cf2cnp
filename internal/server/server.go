@@ -560,14 +560,18 @@ func wantsJSON(r *http.Request) bool {
 }
 
 // respond writes the generated YAML either as a direct attachment or, for JSON clients, caches it under
-// id and answers with the download URL, the filename, the counts and the YAML itself.
-func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yamlBytes []byte, filename, message string, flows, policies int) {
+// id and answers with the download URL, the filename, the counts, the generator's warnings (the flows it skipped,
+// `[]` when none; the YAML carries them as leading comments) and the YAML itself.
+func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yamlBytes []byte, filename, message string, flows, policies int, warnings []string) {
+	if warnings == nil {
+		warnings = []string{} // `[]`, not `null`: a client may index it
+	}
 	if !wantsJSON(r) {
 		w.Header().Set("Content-Type", "application/x-yaml")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		w.WriteHeader(http.StatusOK)
 		w.Write(yamlBytes)
-		s.reqLog(r).Info("generated", "mode", "direct", "filename", filename, "flows", flows, "policies", policies)
+		s.reqLog(r).Info("generated", "mode", "direct", "filename", filename, "flows", flows, "policies", policies, "warnings", len(warnings))
 		return
 	}
 	s.mu.Lock()
@@ -585,9 +589,10 @@ func (s *Server) respond(w http.ResponseWriter, r *http.Request, id string, yaml
 		"message":      message,
 		"flows":        flows,
 		"policies":     policies,
+		"warnings":     warnings,
 		"yaml":         string(yamlBytes),
 	})
-	s.reqLog(r).Info("generated", "mode", "cached", "filename", filename, "id", id, "flows", flows, "policies", policies)
+	s.reqLog(r).Info("generated", "mode", "cached", "filename", filename, "id", id, "flows", flows, "policies", policies, "warnings", len(warnings))
 }
 
 // corsMiddleware answers preflight and echoes the request's Origin when it is allowed — any origin when
@@ -850,7 +855,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
         <code>?name=&lt;name&gt;</code> names the (single) resulting policy.</p>
         <p><strong>Content-Type:</strong> application/json</p>
         <p><strong>Response:</strong> YAML (one document per policy) for curl; with <code>Accept: application/json</code>
-        or <code>X-Grafana-Action</code>, JSON <code>{download_url, filename, yaml, flows, policies}</code></p>
+        or <code>X-Grafana-Action</code>, JSON <code>{download_url, filename, yaml, flows, policies, warnings}</code>.
+        <code>warnings</code> lists the flows no policy can express (a reserved-identity source, for one); the YAML
+        carries them as leading comments.</p>
         <div class="try">
         <h3>Try it out</h3>
         <p>Paste Hubble flow JSON below — one flow, a JSON array, or one flow per line (the output of
@@ -1223,6 +1230,8 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, policy.ErrReplyFlow):
 			s.refuse(w, r, http.StatusBadRequest, err.Error(), "reply_flow")
+		case errors.Is(err, policy.ErrNothingGenerated):
+			s.refuse(w, r, http.StatusBadRequest, err.Error(), "nothing_generated", "error", cutRunes(err.Error(), 200))
 		case errors.Is(err, policy.ErrNameNeedsOnePolicy):
 			n := 0
 			fmt.Sscanf(strings.TrimPrefix(err.Error(), policy.ErrNameNeedsOnePolicy.Error()+": got "), "%d", &n)
@@ -1250,7 +1259,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = generateID()
 	}
-	s.respond(w, r, id, yamlBytes, filename, "Policy generated successfully. Use the download_url to download the file.", len(parsedFlows), len(policies))
+	s.respond(w, r, id, yamlBytes, filename, "Policy generated successfully. Use the download_url to download the file.", len(parsedFlows), len(policies), generator.Warnings())
 }
 
 // handleYoloNs handles the YOLO namespace easter egg
@@ -1272,7 +1281,7 @@ func (s *Server) handleYoloNs(w http.ResponseWriter, r *http.Request, bodyStr st
 	}
 
 	filename := fmt.Sprintf("%s-yolo-allow-all-in-namespace.yaml", namespace)
-	s.respond(w, r, generateID(), yamlBytes, filename, "YOLO! Policy generated. Use the download_url to download the file.", 0, 1)
+	s.respond(w, r, generateID(), yamlBytes, filename, "YOLO! Policy generated. Use the download_url to download the file.", 0, 1, nil)
 }
 
 // sanitizeName ensures the name is valid for filenames

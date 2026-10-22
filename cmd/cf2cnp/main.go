@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -87,7 +88,7 @@ and returns CiliumNetworkPolicy YAML files.
 
 Endpoints:
   POST /generate      - Send flow JSON (one flow, a JSON array, or one flow per line), receive policy YAML;
-                        with Accept: application/json, receive {download_url, filename, yaml, flows, policies}.
+                        with Accept: application/json, receive {download_url, filename, yaml, flows, policies, warnings}.
                         ?name=<policy name> names the (single) resulting policy.
   GET  /download/{id} - Download a generated policy (cached 10 minutes)
   GET  /health        - Health check endpoint
@@ -230,12 +231,25 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	if dnsVisibility {
 		generator = generator.WithDNSVisibility()
 	}
-	if err := generator.GeneratePolicies(aggregatedFlows); err != nil {
+	err = generator.GeneratePolicies(aggregatedFlows)
+	printWarnings(generator, err)
+	if err != nil {
 		return fmt.Errorf("failed to generate policies: %w", err)
 	}
 
 	fmt.Println("Policy generation complete!")
 	return nil
+}
+
+// printWarnings writes what the generator skipped to stderr, one line each, so a redirected stdout stays clean.
+// When every flow was skipped the error already carries the same sentences; printing them twice helps nobody.
+func printWarnings(g *policy.Generator, err error) {
+	if errors.Is(err, policy.ErrNothingGenerated) {
+		return
+	}
+	for _, w := range g.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -317,6 +331,7 @@ func runMerge(cmd *cobra.Command, args []string) error {
 		generator = generator.WithL7() // review ENH-003 (Codex, second pass): the policy-PR template passes --l7 to merge
 	}
 	policies, err := generator.BuildPolicies(aggregator.AggregateFlows(flows))
+	printWarnings(generator, err)
 	if err != nil {
 		return err
 	}
@@ -334,7 +349,7 @@ func runMerge(cmd *cobra.Command, args []string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(target, out, 0o644); err != nil {
+	if err := os.WriteFile(target, generator.AnnotateWarnings(out), 0o644); err != nil { // the run's warnings replace the file's
 		return err
 	}
 	fmt.Printf("%d rule(s) added → %s\n", added, target)
