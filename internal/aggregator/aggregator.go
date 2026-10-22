@@ -165,6 +165,12 @@ func containsRequest(reqs []HTTPRequest, r HTTPRequest) bool {
 func generateAggregationKey(f *flow.ParsedFlow) string {
 	var parts []string
 	parts = append(parts, f.Direction)
+	// A reply is its own group (fork issue #13): merged into the request of the same peers, it made the group a
+	// reply when it came first, and added the client's ephemeral port (its destination_port) when it came second.
+	// The underscore cannot occur in a namespace, so the marker cannot be mistaken for one.
+	if f.IsReply {
+		parts = append(parts, "is_reply")
+	}
 	parts = append(parts, f.SourceNamespace)
 	parts = append(parts, labelsToString(f.SourceLabels))
 	parts = append(parts, f.SourceCluster) // a peer in another cluster is another peer (E1)
